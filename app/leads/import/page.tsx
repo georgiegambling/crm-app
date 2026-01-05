@@ -18,7 +18,7 @@ type LeadInsert = {
   lead_ref?: string | null
 }
 
-const REQUIRED_FIELDS = ['full_name', 'phone', 'email', 'status', 'source'] as const
+const REQUIRED_FIELDS = ['full_name', 'phone'] as const
 
 function normKey(k: string) {
   return k.trim().toLowerCase()
