@@ -11,9 +11,9 @@ type CsvRow = Record<string, unknown>
 type LeadInsert = {
   full_name: string
   phone: string
-  email: string
-  status: string
-  source: string
+  email?: string | null
+  status?: string
+  source?: string
   assigned_to?: string | null
   lead_ref?: string | null
 }
@@ -69,9 +69,11 @@ export default function LeadsImportPage() {
     setRawRows([])
   }
 
+  // ✅ UPDATED: email/status/source are OPTIONAL and get defaults if blank/missing
   function validateAndTransform(rows: CsvRow[]) {
     const leads: LeadInsert[] = []
     const errors: Array<{ row: number; reason: string }> = []
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/i
 
     rows.forEach((r, idx) => {
       const rowNum = idx + 2 // header row is 1
@@ -84,22 +86,36 @@ export default function LeadsImportPage() {
         }
       }
 
+      const full_name = cleanText((r as any).full_name)
+      const phone = cleanPhone((r as any).phone)
+
+      const emailRaw = cleanEmail((r as any).email) // '' if missing/blank
+      const statusRaw = cleanText((r as any).status)
+      const sourceRaw = cleanText((r as any).source)
+
+      // ✅ Only validate email IF it was provided
+      if (emailRaw && !emailRegex.test(emailRaw)) {
+        errors.push({ row: rowNum, reason: 'Email does not look valid' })
+        return
+      }
+
       const lead: LeadInsert = {
-        full_name: cleanText((r as any).full_name),
-        phone: cleanPhone((r as any).phone),
-        email: cleanEmail((r as any).email),
-        status: cleanText((r as any).status),
-        source: cleanText((r as any).source),
+        full_name,
+        phone,
+
+        // ✅ optional: null if blank/missing
+        email: emailRaw ? emailRaw : null,
+
+        // ✅ defaults if blank/missing
+        status: statusRaw || 'New Lead',
+        source: sourceRaw || 'CSV Import',
+
         assigned_to: (r as any).assigned_to ? cleanText((r as any).assigned_to) : null,
         lead_ref: (r as any).lead_ref ? cleanText((r as any).lead_ref) : null,
       }
 
       if (lead.phone.length < 6) {
         errors.push({ row: rowNum, reason: 'Phone looks too short after cleaning' })
-        return
-      }
-      if (!lead.email.includes('@')) {
-        errors.push({ row: rowNum, reason: 'Email does not look valid' })
         return
       }
 
@@ -182,8 +198,9 @@ export default function LeadsImportPage() {
   }
 
   const downloadTemplate = () => {
+    // ✅ UPDATED: only full_name + phone required
     const header = ['full_name', 'phone', 'email', 'status', 'source', 'assigned_to', 'lead_ref']
-    const sample1 = ['John Smith', '07123456789', 'john@example.com', 'New Lead', 'Website', 'Georgie', '']
+    const sample1 = ['John Smith', '07123456789', '', '', '', '', '']
     const sample2 = ['Sarah Khan', '07911112222', 'sarah@example.com', 'Contacted', 'Instagram', '', '']
     const csv =
       [header, sample1, sample2]
@@ -191,7 +208,6 @@ export default function LeadsImportPage() {
           row
             .map((cell) => {
               const v = String(cell ?? '')
-              // quote fields containing commas/quotes/newlines
               if (/[",\n]/.test(v)) return `"${v.replace(/"/g, '""')}"`
               return v
             })
@@ -257,8 +273,8 @@ export default function LeadsImportPage() {
               <div>
                 <div style={h1}>Import Leads</div>
                 <div style={subtitle}>
-                  Upload a CSV and bulk import to Supabase. Required headers:{' '}
-                  <span style={monoBadge}>full_name, phone, email, status, source</span>
+                  Upload a CSV and bulk import to Supabase.{' '}
+                  <span style={monoBadge}>Required: full_name, phone • Optional: email, status, source, assigned_to, lead_ref</span>
                 </div>
               </div>
             </div>
