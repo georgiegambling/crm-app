@@ -67,6 +67,9 @@ export default function Sidebar({ role: roleProp }: SidebarProps) {
       { label: 'Dashboard', path: '/dashboard', show: true },
       { label: 'Leads', path: '/leads', show: true },
 
+      // ✅ Staff/Admin only
+      { label: 'Import Leads', path: '/leads/import', show: isStaff },
+
       // Admin-only examples
       { label: 'Users', path: '/admin/users', show: role === 'admin' },
       { label: 'Settings', path: '/admin/settings', show: role === 'admin' },
@@ -74,7 +77,7 @@ export default function Sidebar({ role: roleProp }: SidebarProps) {
       // Client-only examples
       { label: 'My Reports', path: '/client/reports', show: role === 'client' },
     ].filter((x) => x.show)
-  }, [role])
+  }, [role, isStaff])
 
   return (
     <>
@@ -127,9 +130,13 @@ export default function Sidebar({ role: roleProp }: SidebarProps) {
 
             <div style={styles.nav}>
               {items.map((item) => {
+                // ✅ Better active detection:
+                // - exact match OR child route match
+                // - special case: keep "Leads" active for everything under /leads
                 const active =
                   pathname === item.path ||
-                  (item.path !== '/' && pathname?.startsWith(item.path + '/'))
+                  (item.path !== '/' && pathname?.startsWith(item.path + '/')) ||
+                  (item.path === '/leads' && pathname?.startsWith('/leads'))
 
                 return (
                   <button

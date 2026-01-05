@@ -1,130 +1,143 @@
 'use client'
 
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { supabase } from '@/lib/supabaseClient'
 
-export default function LoginPage() {
+function parseHashTokens() {
+  if (typeof window === 'undefined') return null
+  const hash = window.location.hash?.replace(/^#/, '')
+  if (!hash) return null
+
+  const params = new URLSearchParams(hash)
+  const access_token = params.get('access_token')
+  const refresh_token = params.get('refresh_token')
+
+  if (!access_token || !refresh_token) return null
+  return { access_token, refresh_token }
+}
+
+export default function ResetPasswordPage() {
   const router = useRouter()
 
-  const [email, setEmail] = useState('')
-  const [password, setPassword] = useState('')
+  const [pw, setPw] = useState('')
+  const [pw2, setPw2] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [info, setInfo] = useState<string | null>(null)
+  const [ready, setReady] = useState(false)
 
   const canSubmit = useMemo(() => {
-    return email.trim().length > 3 && password.length >= 6 && !loading
-  }, [email, password, loading])
+    return pw.length >= 8 && pw2.length >= 8 && pw === pw2 && !loading
+  }, [pw, pw2, loading])
 
-  const onSubmit = async (e: React.FormEvent) => {
+  useEffect(() => {
+    ;(async () => {
+      setError(null)
+      setInfo(null)
+
+      const { data } = await supabase.auth.getSession()
+      if (data.session) {
+        setReady(true)
+        return
+      }
+
+      const tokens = parseHashTokens()
+      if (!tokens) {
+        setError('This reset link is missing tokens or has expired. Please request a new reset email.')
+        setReady(false)
+        return
+      }
+
+      const { error: setErr } = await supabase.auth.setSession(tokens)
+      if (setErr) {
+        setError(setErr.message)
+        setReady(false)
+        return
+      }
+
+      // remove hash after session is set
+      window.history.replaceState({}, document.title, window.location.pathname)
+
+      setReady(true)
+    })()
+  }, [])
+
+  const submit = async (e: React.FormEvent) => {
     e.preventDefault()
     setError(null)
     setInfo(null)
+
+    if (pw.length < 8) return setError('Password must be at least 8 characters.')
+    if (pw !== pw2) return setError('Passwords do not match.')
+
     setLoading(true)
-
-    const { error } = await supabase.auth.signInWithPassword({
-      email: email.trim(),
-      password,
-    })
-
+    const { error } = await supabase.auth.updateUser({ password: pw })
     setLoading(false)
 
-    if (error) {
-      setError(error.message)
-      return
-    }
-sessionStorage.setItem('t5_welcome', '1')
-router.replace('/dashboard')
-  }
+    if (error) return setError(error.message)
 
-  // ✅ (A) Forgot password code goes here
-  const handleForgotPassword = async () => {
-    setError(null)
-    setInfo(null)
-
-    const trimmed = email.trim()
-    if (!trimmed) {
-      setError('Enter your email first, then click “Forgot password?”.')
-      return
-    }
-
-    const { error } = await supabase.auth.resetPasswordForEmail(trimmed, {
-      redirectTo: `${window.location.origin}/auth/reset`,
-    })
-
-    if (error) {
-      setError(error.message)
-      return
-    }
-
-    setInfo('✅ Password reset email sent. Check your inbox (and spam).')
+    setInfo('✅ Password updated. Taking you to login…')
+    setTimeout(() => router.replace('/login'), 900)
   }
 
   return (
     <main className="login-page">
-      {/* background glows */}
       <div className="bg-glow bg-glow-a" />
       <div className="bg-glow bg-glow-b" />
 
       <section className="card-wrap">
         <div className="card">
-          {/* subtle watermark behind card */}
           <div className="wm" aria-hidden />
 
           <header className="head">
             <div className="logo">T5</div>
             <div className="head-text">
               <div className="pill">Triple 555 CRM</div>
-              <div className="title">Welcome back</div>
-              <div className="sub">Sign in to access your dashboard</div>
+              <div className="title">Reset password</div>
+              <div className="sub">Choose a new password for your account</div>
             </div>
           </header>
 
-          <form onSubmit={onSubmit} className="form">
+          <form onSubmit={submit} className="form">
             <label className="field">
-              <span className="label">Email</span>
+              <span className="label">New password</span>
               <input
                 className="input"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                placeholder="you@company.co.uk"
-                autoComplete="email"
-                inputMode="email"
-                required
-              />
-            </label>
-
-            <label className="field">
-              <span className="label">Password</span>
-              <input
-                className="input"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                placeholder="••••••••"
+                value={pw}
+                onChange={(e) => setPw(e.target.value)}
+                placeholder="Minimum 8 characters"
                 type="password"
-                autoComplete="current-password"
+                autoComplete="new-password"
                 required
+                disabled={!ready || loading}
               />
             </label>
 
+            <label className="field">
+              <span className="label">Confirm new password</span>
+              <input
+                className="input"
+                value={pw2}
+                onChange={(e) => setPw2(e.target.value)}
+                placeholder="Repeat your password"
+                type="password"
+                autoComplete="new-password"
+                required
+                disabled={!ready || loading}
+              />
+            </label>
+
+            {!ready && !error && <div className="info">Preparing reset link…</div>}
             {error && <div className="error">{error}</div>}
             {info && <div className="info">{info}</div>}
 
-            <button className="btn" type="submit" disabled={!canSubmit}>
-              {loading ? 'Signing in…' : 'Sign in'}
+            <button className="btn" type="submit" disabled={!ready || !canSubmit}>
+              {loading ? 'Saving…' : 'Set new password'}
             </button>
 
-            {/* ✅ Forgot password */}
-            <button
-              className="btn-ghost"
-              type="button"
-              onClick={handleForgotPassword}
-              disabled={loading}
-              aria-disabled={loading}
-              title="Send a password reset email"
-            >
-              Forgot password?
+            <button className="btn-ghost" type="button" onClick={() => router.replace('/login')} disabled={loading}>
+              Back to login
             </button>
 
             <div className="foot">Secure internal access · Triple 555</div>
@@ -132,7 +145,7 @@ router.replace('/dashboard')
         </div>
       </section>
 
-      <style jsx>{`
+      <style>{`
         .login-page {
           min-height: 100vh;
           display: grid;
@@ -152,7 +165,6 @@ router.replace('/dashboard')
           inset: -200px;
           pointer-events: none;
           opacity: 0.9;
-          filter: blur(0px);
         }
         .bg-glow-a {
           background: radial-gradient(520px 320px at 45% 12%, rgba(0, 255, 255, 0.22), rgba(0, 0, 0, 0) 70%);
@@ -182,7 +194,6 @@ router.replace('/dashboard')
           box-shadow: 0 0 0 1px rgba(0, 255, 255, 0.08), 0 18px 60px rgba(0, 0, 0, 0.6);
         }
 
-        /* cyan edge glow like your leads panels */
         .card:before {
           content: '';
           position: absolute;
@@ -196,7 +207,6 @@ router.replace('/dashboard')
           mix-blend-mode: screen;
         }
 
-        /* subtle Triple555 watermark behind content */
         .wm {
           position: absolute;
           inset: 0;
@@ -216,7 +226,6 @@ router.replace('/dashboard')
           letter-spacing: 6px;
           font-size: 34px;
           color: rgba(0, 255, 255, 0.22);
-          filter: blur(0.2px);
           white-space: nowrap;
           mask-image: linear-gradient(90deg, transparent, rgba(0, 0, 0, 1), transparent);
           opacity: 0.35;
@@ -238,7 +247,6 @@ router.replace('/dashboard')
           display: grid;
           place-items: center;
           font-weight: 950;
-
           background: rgba(0, 255, 255, 0.14);
           border: 1px solid rgba(0, 255, 255, 0.35);
           box-shadow: 0 0 0 1px rgba(0, 255, 255, 0.12), 0 14px 40px rgba(0, 0, 0, 0.6);

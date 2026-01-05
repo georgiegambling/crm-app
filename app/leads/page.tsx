@@ -448,6 +448,15 @@ export default function LeadsPage() {
                 {refreshing ? 'Refreshing…' : '↻ Refresh'}
               </button>
 
+              {/* ✅ ADDED: Import Leads button */}
+              <button
+                onClick={() => router.push('/leads/import')}
+                style={btnGhost}
+                title="Import leads from CSV"
+              >
+                Import Leads
+              </button>
+
               <button onClick={openAdd} style={btnCyan}>
                 + New Lead
               </button>
