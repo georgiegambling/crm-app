@@ -54,7 +54,24 @@ type TabKey =
   | 'LOST'
   | 'ARCHIVE'
 
-const STATUS_OPTIONS = ['New Lead', 'Contacted', 'Qualified', 'Callback', 'Won', 'Lost', 'Archive'] as const
+const STATUS_OPTIONS = [
+  'New Lead',
+  'Contacted',
+  'Qualified',
+  'Pending Photos',
+  'Sent To Client',
+  'Looking for home',
+  'Callback',
+  'Boiler Above 86%',
+  'No Benefits',
+  'Dead Number',
+  'Not Interested',
+  'Do Not Call',
+  'Voicemail',
+  'No Answer',
+  'VM 5+ days',
+  'NA 5+ days',
+] as const
 const SOURCE_OPTIONS = ['Instagram', 'Website', 'Referral', 'WhatsApp', 'Facebook', 'TikTok', 'Other'] as const
 
 function formatDate(d: string) {
