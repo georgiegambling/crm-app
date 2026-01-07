@@ -17,6 +17,17 @@ export default function Sidebar({ role: roleProp }: SidebarProps) {
   const [open, setOpen] = useState(false)
   const [role, setRole] = useState<Role>(roleProp ?? 'client')
 
+  // ✅ simple viewport state (for responsive drawer sizing)
+  const [vw, setVw] = useState<number>(1200)
+  useEffect(() => {
+    const onResize = () => setVw(window.innerWidth || 1200)
+    onResize()
+    window.addEventListener('resize', onResize)
+    return () => window.removeEventListener('resize', onResize)
+  }, [])
+  const isMobile = vw < 820
+  const isTiny = vw < 420
+
   // Auto-resolve role if not passed in
   useEffect(() => {
     if (roleProp) return
@@ -26,11 +37,7 @@ export default function Sidebar({ role: roleProp }: SidebarProps) {
       const user = sessionData.session?.user
       if (!user) return
 
-      const { data: prof } = await supabase
-        .from('profiles')
-        .select('role')
-        .eq('id', user.id)
-        .single()
+      const { data: prof } = await supabase.from('profiles').select('role').eq('id', user.id).single()
 
       setRole(prof?.role ?? 'client')
     })()
@@ -79,17 +86,16 @@ export default function Sidebar({ role: roleProp }: SidebarProps) {
     ].filter((x) => x.show)
   }, [role, isStaff])
 
+  const drawerWidth = isTiny ? '92vw' : isMobile ? '86vw' : 340
+
   return (
     <>
       {/* Floating toggle */}
-      <button
-        onClick={() => setOpen(true)}
-        style={styles.fab}
-        aria-label="Open menu"
-        title="Menu"
-      >
-        ☰
-      </button>
+      {!open && (
+        <button onClick={() => setOpen(true)} style={styles.fab} aria-label="Open menu" title="Menu">
+          ☰
+        </button>
+      )}
 
       {/* Backdrop + Drawer */}
       {open && (
@@ -99,7 +105,12 @@ export default function Sidebar({ role: roleProp }: SidebarProps) {
             if (e.target === e.currentTarget) setOpen(false)
           }}
         >
-          <div style={styles.drawer} role="dialog" aria-modal="true">
+          <div
+            style={{ ...styles.drawer, width: drawerWidth }}
+            role="dialog"
+            aria-modal="true"
+            aria-label="Sidebar menu"
+          >
             <div style={styles.topRow}>
               <div style={styles.brandPill}>
                 <span style={styles.dot} />
@@ -118,42 +129,35 @@ export default function Sidebar({ role: roleProp }: SidebarProps) {
 
             <div style={styles.roleRow}>
               <div style={styles.roleBadge}>
-                Role:{' '}
-                <b style={{ color: 'rgba(120,255,255,0.95)' }}>
-                  {role}
-                </b>
+                Role: <b style={{ color: 'rgba(120,255,255,0.95)' }}>{role}</b>
               </div>
-              <div style={{ opacity: 0.75, fontWeight: 900, fontSize: 12 }}>
-                {isStaff ? 'Internal access' : 'Client access'}
-              </div>
+              <div style={styles.accessText}>{isStaff ? 'Internal access' : 'Client access'}</div>
             </div>
 
-            <div style={styles.nav}>
-              {items.map((item) => {
-                // ✅ Better active detection:
-                // - exact match OR child route match
-                // - special case: keep "Leads" active for everything under /leads
-                const active =
-                  pathname === item.path ||
-                  (item.path !== '/' && pathname?.startsWith(item.path + '/')) ||
-                  (item.path === '/leads' && pathname?.startsWith('/leads'))
+            {/* ✅ Scrollable nav area */}
+            <div style={styles.navScroll}>
+              <div style={styles.nav}>
+                {items.map((item) => {
+                  const active =
+                    pathname === item.path ||
+                    (item.path !== '/' && pathname?.startsWith(item.path + '/')) ||
+                    (item.path === '/leads' && pathname?.startsWith('/leads'))
 
-                return (
-                  <button
-                    key={item.path}
-                    onClick={() => router.push(item.path)}
-                    style={{
-                      ...styles.navBtn,
-                      ...(active ? styles.navBtnActive : {}),
-                    }}
-                  >
-                    {item.label}
-                  </button>
-                )
-              })}
+                  return (
+                    <button
+                      key={item.path}
+                      onClick={() => router.push(item.path)}
+                      style={{
+                        ...styles.navBtn,
+                        ...(active ? styles.navBtnActive : {}),
+                      }}
+                    >
+                      {item.label}
+                    </button>
+                  )
+                })}
+              </div>
             </div>
-
-            <div style={{ flex: 1 }} />
 
             <div style={styles.bottom}>
               <button
@@ -166,6 +170,9 @@ export default function Sidebar({ role: roleProp }: SidebarProps) {
                 Sign out
               </button>
             </div>
+
+            {/* ✅ little mobile hint spacing */}
+            <div style={{ height: isMobile ? 10 : 0 }} />
           </div>
         </div>
       )}
@@ -189,6 +196,7 @@ const styles: Record<string, React.CSSProperties> = {
     cursor: 'pointer',
     boxShadow: '0 0 0 1px rgba(0,255,255,0.10) inset, 0 18px 50px rgba(0,0,0,0.55)',
     backdropFilter: 'blur(10px)',
+    WebkitTapHighlightColor: 'transparent',
   },
 
   backdrop: {
@@ -202,8 +210,6 @@ const styles: Record<string, React.CSSProperties> = {
   },
 
   drawer: {
-    width: 320,
-    maxWidth: '85vw',
     height: '100%',
     background:
       'radial-gradient(900px 500px at 20% 0%, rgba(0,255,255,0.10), rgba(0,0,0,0) 55%), linear-gradient(180deg, rgba(10,18,45,0.98), rgba(6,10,26,0.98))',
@@ -236,6 +242,7 @@ const styles: Record<string, React.CSSProperties> = {
     fontWeight: 900,
     letterSpacing: 0.3,
     color: '#fff',
+    whiteSpace: 'nowrap',
   },
 
   dot: {
@@ -248,14 +255,15 @@ const styles: Record<string, React.CSSProperties> = {
   },
 
   closeBtn: {
-    width: 38,
-    height: 38,
+    width: 42,
+    height: 42,
     borderRadius: 12,
     border: '1px solid rgba(255,255,255,0.12)',
     background: 'rgba(255,255,255,0.06)',
     color: '#fff',
     fontWeight: 1000,
     cursor: 'pointer',
+    WebkitTapHighlightColor: 'transparent',
   },
 
   roleRow: {
@@ -264,6 +272,7 @@ const styles: Record<string, React.CSSProperties> = {
     alignItems: 'center',
     justifyContent: 'space-between',
     gap: 10,
+    flexWrap: 'wrap',
   },
 
   roleBadge: {
@@ -279,8 +288,20 @@ const styles: Record<string, React.CSSProperties> = {
     color: 'rgba(210,255,255,0.95)',
   },
 
-  nav: {
+  accessText: {
+    opacity: 0.75,
+    fontWeight: 900,
+    fontSize: 12,
+  },
+
+  navScroll: {
     marginTop: 14,
+    flex: 1,
+    overflowY: 'auto',
+    paddingRight: 2,
+  },
+
+  nav: {
     display: 'flex',
     flexDirection: 'column',
     gap: 10,
@@ -288,13 +309,14 @@ const styles: Record<string, React.CSSProperties> = {
 
   navBtn: {
     textAlign: 'left',
-    padding: '12px 12px',
+    padding: '13px 12px',
     borderRadius: 14,
     border: '1px solid rgba(0,255,255,0.16)',
     background: 'rgba(255,255,255,0.04)',
     color: '#fff',
     fontWeight: 950,
     cursor: 'pointer',
+    WebkitTapHighlightColor: 'transparent',
   },
 
   navBtnActive: {
@@ -319,5 +341,6 @@ const styles: Record<string, React.CSSProperties> = {
     color: '#fff',
     fontWeight: 900,
     cursor: 'pointer',
+    WebkitTapHighlightColor: 'transparent',
   },
 }
