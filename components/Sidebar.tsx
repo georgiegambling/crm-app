@@ -38,7 +38,6 @@ export default function Sidebar({ role: roleProp }: SidebarProps) {
       if (!user) return
 
       const { data: prof } = await supabase.from('profiles').select('role').eq('id', user.id).single()
-
       setRole(prof?.role ?? 'client')
     })()
   }, [roleProp])
@@ -68,6 +67,7 @@ export default function Sidebar({ role: roleProp }: SidebarProps) {
   }, [open])
 
   const isStaff = role === 'admin' || role === 'staff'
+  const isAdmin = role === 'admin'
 
   const items = useMemo(() => {
     return [
@@ -77,14 +77,18 @@ export default function Sidebar({ role: roleProp }: SidebarProps) {
       // ✅ Staff/Admin only
       { label: 'Import Leads', path: '/leads/import', show: isStaff },
 
-      // Admin-only examples
-      { label: 'Users', path: '/admin/users', show: role === 'admin' },
-      { label: 'Settings', path: '/admin/settings', show: role === 'admin' },
+      // ✅ Staff/Admin only (clients must NOT see this exists)
+      // Choose your route: '/reports' OR '/staff/reports' depending on where you put the page.
+      { label: 'Sales Reports', path: '/staff/reports', show: isStaff },
 
-      // Client-only examples
-      { label: 'My Reports', path: '/client/reports', show: role === 'client' },
+      // Admin-only examples
+      { label: 'Users', path: '/admin/users', show: isAdmin },
+      { label: 'Settings', path: '/admin/settings', show: isAdmin },
+
+      // ❌ Remove client access to any "reports" page unless you REALLY want a separate client-facing one.
+      // { label: 'My Reports', path: '/client/reports', show: role === 'client' },
     ].filter((x) => x.show)
-  }, [role, isStaff])
+  }, [isStaff, isAdmin])
 
   const drawerWidth = isTiny ? '92vw' : isMobile ? '86vw' : 340
 
@@ -105,24 +109,14 @@ export default function Sidebar({ role: roleProp }: SidebarProps) {
             if (e.target === e.currentTarget) setOpen(false)
           }}
         >
-          <div
-            style={{ ...styles.drawer, width: drawerWidth }}
-            role="dialog"
-            aria-modal="true"
-            aria-label="Sidebar menu"
-          >
+          <div style={{ ...styles.drawer, width: drawerWidth }} role="dialog" aria-modal="true" aria-label="Sidebar menu">
             <div style={styles.topRow}>
               <div style={styles.brandPill}>
                 <span style={styles.dot} />
                 <span style={{ opacity: 0.95 }}>Triple 555 CRM</span>
               </div>
 
-              <button
-                onClick={() => setOpen(false)}
-                style={styles.closeBtn}
-                aria-label="Close menu"
-                title="Close"
-              >
+              <button onClick={() => setOpen(false)} style={styles.closeBtn} aria-label="Close menu" title="Close">
                 ✕
               </button>
             </div>
@@ -171,7 +165,6 @@ export default function Sidebar({ role: roleProp }: SidebarProps) {
               </button>
             </div>
 
-            {/* ✅ little mobile hint spacing */}
             <div style={{ height: isMobile ? 10 : 0 }} />
           </div>
         </div>
