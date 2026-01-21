@@ -1,854 +1,1005 @@
 'use client'
 
-import React, { CSSProperties, useEffect, useMemo, useState } from 'react'
-import { supabase } from '@/lib/supabaseClient'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
-import Sidebar from '@/components/Sidebar'
+import { supabase } from '@/lib/supabaseClient'
 
-type Lead = {
+
+type TimeRange = '7D' | '30D' | 'ALL'
+
+type LeadRow = {
   id: string
-  lead_ref: string | null
-  full_name: string
-  phone: string
-  email: string
-  status: string
-  source: string
-  assigned_to: string | null
   created_at: string
-  notes: string | null
+  status: string | null
+  source: string | null
+  assigned_to: string | null
+  callback_at?: string | null
 }
 
-/**
- * ✅ Make sure these statuses exist in your CRM (or at least the ones you use).
- * We include "Do Not Call" because you asked for it in KPI logic.
- */
-const STATUS_ORDER = [
-  'New Lead',
-  'Contacted',
-  'Qualified',
-  'Pending Photos',
-  'Sent To Client',
-  'Looking for home',
-  'Callback',
-  'Voicemail',
-  'No Answer',
-  'VM 5+ days',
-  'NA 5+ days',
-  'Not Interested',
-  'Boiler Above 86%',
-  'No Benefits',
-  'Dead Number',
-  'Do Not Call',
-] as const
-
-/**
- * ✅ KPI DEFINITIONS (as per your message)
- *
- * Contact Rate statuses (the screenshot list):
- * Contacted, Qualified, Pending Photos, Sent To Client, Looking for home, Callback,
- * Boiler Above 86%, No Benefits, Dead Number, Not Interested
- */
-const CONTACT_RATE_STATUSES = new Set([
-  'Contacted',
-  'Qualified',
-  'Pending Photos',
-  'Sent To Client',
-  'Looking for home',
-  'Callback',
-  'Boiler Above 86%',
-  'No Benefits',
-  'Dead Number',
-  'Not Interested',
-])
-
-/**
- * Qualification Rate:
- * Sent To Client OR Looking for home OR Qualified
- */
-const QUALIFICATION_RATE_STATUSES = new Set(['Sent To Client', 'Looking for home', 'Qualified'])
-
-/**
- * Drop-off Rate:
- * VM 5+ days, NA 5+ days, Not Interested, Boiler Above 86%, No Benefits, Do Not Call
- */
-const DROP_OFF_STATUSES = new Set(['VM 5+ days', 'NA 5+ days', 'Not Interested', 'Boiler Above 86%', 'No Benefits', 'Do Not Call'])
-
-/**
- * Pipeline Health → "Stale leads" =
- * (New Lead older than 7 days) OR (any DROP_OFF_STATUSES)
- */
-const PIPELINE_STALE_DAYS = 7
-
-/**
- * Pipeline score weights (can tweak later)
- * - Keep it simple but meaningful for now.
- */
-const PIPELINE_POINTS: Record<string, number> = {
-  'New Lead': 1,
-  Contacted: 3,
-  Qualified: 5,
-  'Pending Photos': 6,
-  'Sent To Client': 9,
-  'Looking for home': 7,
-  Callback: 2,
-  Voicemail: 1,
-  'No Answer': 1,
-  'VM 5+ days': 0,
-  'NA 5+ days': 0,
-  'Not Interested': 0,
-  'No Benefits': 0,
-  'Dead Number': 0,
-  'Boiler Above 86%': 0,
-  'Do Not Call': 0,
+function clamp(n: number, min: number, max: number) {
+  return Math.max(min, Math.min(max, n))
 }
 
-function startOfDay(d = new Date()) {
+function pct(n: number, d: number) {
+  if (!d) return 0
+  return Math.round((n / d) * 100)
+}
+
+function startOfDay(d: Date) {
   const x = new Date(d)
   x.setHours(0, 0, 0, 0)
   return x
 }
+
 function daysAgo(n: number) {
   const d = new Date()
   d.setDate(d.getDate() - n)
   return d
 }
-function fmtPct(v: number) {
-  if (!isFinite(v)) return '0%'
-  return `${Math.round(v * 100)}%`
+
+function formatShort(dt: Date) {
+  const dd = String(dt.getDate()).padStart(2, '0')
+  const mm = String(dt.getMonth() + 1).padStart(2, '0')
+  return `${dd}/${mm}`
 }
-function fmtInt(n: number) {
-  return new Intl.NumberFormat().format(n)
+
+/* -------------------- Animated background (solar system) -------------------- */
+
+function SolarSystemBackground() {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null)
+  const rafRef = useRef<number | null>(null)
+
+  useEffect(() => {
+    const c = canvasRef.current
+    if (!c) return
+
+    const ctx = c.getContext('2d')
+    if (!ctx) return
+
+    const resize = () => {
+      const dpr = window.devicePixelRatio || 1
+      c.width = Math.floor(window.innerWidth * dpr)
+      c.height = Math.floor(window.innerHeight * dpr)
+      c.style.width = `${window.innerWidth}px`
+      c.style.height = `${window.innerHeight}px`
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+    }
+
+    resize()
+    window.addEventListener('resize', resize)
+
+    // stars
+    const starCount = 160
+    const stars = Array.from({ length: starCount }).map(() => ({
+      x: Math.random() * window.innerWidth,
+      y: Math.random() * window.innerHeight,
+      r: 0.6 + Math.random() * 1.8,
+      a: 0.15 + Math.random() * 0.35,
+      tw: 0.002 + Math.random() * 0.006,
+    }))
+
+    // planets in orbits
+    const centre = { x: window.innerWidth * 0.55, y: window.innerHeight * 0.28 }
+    const orbits = [
+      { radius: 70, speed: 0.018, size: 3.2, alpha: 0.55 },
+      { radius: 120, speed: 0.012, size: 4.4, alpha: 0.55 },
+      { radius: 190, speed: 0.009, size: 5.2, alpha: 0.55 },
+      { radius: 270, speed: 0.006, size: 6.3, alpha: 0.55 },
+    ].map((o, i) => ({ ...o, t: Math.random() * Math.PI * 2, i }))
+
+    let tick = 0
+
+    const draw = () => {
+      tick += 1
+
+      // in case the window size changed without resize event firing
+      const w = window.innerWidth
+      const h = window.innerHeight
+
+      // clear
+      ctx.clearRect(0, 0, w, h)
+
+      // very soft vignette
+      ctx.save()
+      const g = ctx.createRadialGradient(w * 0.5, h * 0.45, 40, w * 0.5, h * 0.45, Math.max(w, h) * 0.85)
+      g.addColorStop(0, 'rgba(0,255,255,0.06)')
+      g.addColorStop(0.45, 'rgba(0,0,0,0)')
+      g.addColorStop(1, 'rgba(0,0,0,0.55)')
+      ctx.fillStyle = g
+      ctx.fillRect(0, 0, w, h)
+      ctx.restore()
+
+      // twinkling stars
+      for (const s of stars) {
+        s.a += Math.sin(tick * s.tw) * 0.0025
+        s.a = clamp(s.a, 0.08, 0.55)
+        ctx.beginPath()
+        ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2)
+        ctx.fillStyle = `rgba(200,255,255,${s.a})`
+        ctx.fill()
+      }
+
+      // update centre on scroll-less pages (subtle)
+      centre.x = w * 0.55
+      centre.y = h * 0.28
+
+      // draw orbits
+      ctx.save()
+      ctx.strokeStyle = 'rgba(0,255,255,0.10)'
+      ctx.lineWidth = 1
+      for (const o of orbits) {
+        ctx.beginPath()
+        ctx.ellipse(centre.x, centre.y, o.radius * 1.1, o.radius * 0.62, 0, 0, Math.PI * 2)
+        ctx.stroke()
+      }
+      ctx.restore()
+
+      // draw sun glow
+      ctx.save()
+      const sun = ctx.createRadialGradient(centre.x, centre.y, 0, centre.x, centre.y, 120)
+      sun.addColorStop(0, 'rgba(0,255,255,0.18)')
+      sun.addColorStop(0.35, 'rgba(0,255,255,0.06)')
+      sun.addColorStop(1, 'rgba(0,0,0,0)')
+      ctx.fillStyle = sun
+      ctx.beginPath()
+      ctx.arc(centre.x, centre.y, 120, 0, Math.PI * 2)
+      ctx.fill()
+      ctx.restore()
+
+      // planets
+      for (const o of orbits) {
+        o.t += o.speed
+        const px = centre.x + Math.cos(o.t) * (o.radius * 1.1)
+        const py = centre.y + Math.sin(o.t) * (o.radius * 0.62)
+
+        // planet glow
+        ctx.save()
+        const pg = ctx.createRadialGradient(px, py, 0, px, py, 32)
+        pg.addColorStop(0, `rgba(0,255,255,${0.18 * o.alpha})`)
+        pg.addColorStop(1, 'rgba(0,0,0,0)')
+        ctx.fillStyle = pg
+        ctx.beginPath()
+        ctx.arc(px, py, 32, 0, Math.PI * 2)
+        ctx.fill()
+        ctx.restore()
+
+        // planet body
+        ctx.beginPath()
+        ctx.arc(px, py, o.size, 0, Math.PI * 2)
+        ctx.fillStyle = `rgba(190,255,255,${0.55 * o.alpha})`
+        ctx.fill()
+      }
+
+      rafRef.current = requestAnimationFrame(draw)
+    }
+
+    rafRef.current = requestAnimationFrame(draw)
+
+    return () => {
+      window.removeEventListener('resize', resize)
+      if (rafRef.current) cancelAnimationFrame(rafRef.current)
+    }
+  }, [])
+
+  return (
+    <canvas
+      ref={canvasRef}
+      style={{
+        position: 'fixed',
+        inset: 0,
+        zIndex: 0,
+        pointerEvents: 'none',
+        opacity: 0.9,
+      }}
+      aria-hidden="true"
+    />
+  )
 }
+
+/* -------------------- Dashboard page -------------------- */
 
 export default function DashboardPage() {
   const router = useRouter()
 
+  const [range, setRange] = useState<TimeRange>('30D')
   const [loading, setLoading] = useState(true)
+  const [refreshing, setRefreshing] = useState(false)
   const [errorMsg, setErrorMsg] = useState<string | null>(null)
-  const [leads, setLeads] = useState<Lead[]>([])
-  const [range, setRange] = useState<'7d' | '30d' | 'all'>('30d')
+  const [leads, setLeads] = useState<LeadRow[]>([])
 
-  // UI scale so it feels “premium” at 100% zoom
-  const UI_SCALE = 0.92
-
-  const timeMinISO = useMemo(() => {
-    if (range === 'all') return null
-    const from = range === '7d' ? daysAgo(7) : daysAgo(30)
-    return from.toISOString()
+  const fromDate = useMemo(() => {
+    if (range === '7D') return daysAgo(7)
+    if (range === '30D') return daysAgo(30)
+    return null
   }, [range])
 
   const fetchLeads = async () => {
     setErrorMsg(null)
-    setLoading(true)
 
     let q = supabase
       .from('leads')
-      .select('id, lead_ref, full_name, phone, email, status, source, assigned_to, created_at, notes')
+      .select('id, created_at, status, source, assigned_to, callback_at')
       .order('created_at', { ascending: false })
 
-    if (timeMinISO) q = q.gte('created_at', timeMinISO)
+    if (fromDate) {
+      q = q.gte('created_at', fromDate.toISOString())
+    }
 
     const { data, error } = await q
+
     if (error) {
       setErrorMsg(error.message)
       setLeads([])
-      setLoading(false)
       return
     }
 
-    setLeads((data || []) as Lead[])
-    setLoading(false)
+    setLeads((data || []) as LeadRow[])
   }
 
   useEffect(() => {
-    fetchLeads()
+    ;(async () => {
+      setLoading(true)
+      await fetchLeads()
+      setLoading(false)
+    })()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [timeMinISO])
+  }, [range])
 
-  // =========================
-  // Derived KPIs
-  // =========================
-  const total = leads.length
+  const handleRefresh = async () => {
+    setRefreshing(true)
+    await fetchLeads()
+    setRefreshing(false)
+  }
 
-  const todayCount = useMemo(() => {
-    const s = startOfDay().getTime()
-    return leads.filter((l) => new Date(l.created_at).getTime() >= s).length
-  }, [leads])
-
-  const contactedCount = useMemo(() => leads.filter((l) => CONTACT_RATE_STATUSES.has((l.status || '').trim())).length, [leads])
-
-  const qualifiedCount = useMemo(
-    () => leads.filter((l) => QUALIFICATION_RATE_STATUSES.has((l.status || '').trim())).length,
-    [leads]
+  /* ---------- status mapping (edit to match your exact CRM labels) ---------- */
+  const STAGES = useMemo(
+    () => [
+      { key: 'New Lead', match: ['new', 'new lead'] },
+      { key: 'Contacted', match: ['contacted'] },
+      { key: 'Qualified', match: ['qualified'] },
+      { key: 'Pending Photos', match: ['pending photos', 'pending'] },
+      { key: 'Sent To Client', match: ['sent to client', 'sent'] },
+      { key: 'Looking', match: ['looking'] },
+    ],
+    []
   )
 
-  const sentCount = useMemo(() => leads.filter((l) => (l.status || '').trim() === 'Sent To Client').length, [leads])
-  const lookingCount = useMemo(() => leads.filter((l) => (l.status || '').trim() === 'Looking for home').length, [leads])
+  const DROP_OFF_MATCH = useMemo(() => ['drop-off', 'dnc', 'vm', 'na', 'not eligible'], [])
+  const statusKey = (s: string | null) => (s || '').trim().toLowerCase()
 
-  const dropOffCount = useMemo(() => leads.filter((l) => DROP_OFF_STATUSES.has((l.status || '').trim())).length, [leads])
+  const stageCounts = useMemo(() => {
+    const counts: Record<string, number> = {}
+    for (const s of STAGES) counts[s.key] = 0
 
-  // ✅ Rates (based on YOUR rules)
-  const contactRate = total ? contactedCount / total : 0
-  const qualificationRate = total ? qualifiedCount / total : 0
-  const dropOffRate = total ? dropOffCount / total : 0
-
-  // ✅ "Send rate" now makes sense: Sent To Client as % of Qualified bucket
-  const sendRate = qualifiedCount ? sentCount / qualifiedCount : 0
-
-  // =========================
-  // Pipeline Health: stale leads (your rule)
-  // =========================
-  const staleCount = useMemo(() => {
-    const cutoff = daysAgo(PIPELINE_STALE_DAYS).getTime()
-
-    const staleNew = leads.filter((l) => (l.status || '').trim() === 'New Lead' && new Date(l.created_at).getTime() < cutoff).length
-    const staleBad = leads.filter((l) => DROP_OFF_STATUSES.has((l.status || '').trim())).length
-
-    return staleNew + staleBad
-  }, [leads])
-
-  // Other health helpers
-  const callbackCount = useMemo(() => leads.filter((l) => (l.status || '').trim().toLowerCase() === 'callback').length, [leads])
-  const vm5 = useMemo(() => leads.filter((l) => (l.status || '').trim() === 'VM 5+ days').length, [leads])
-  const na5 = useMemo(() => leads.filter((l) => (l.status || '').trim() === 'NA 5+ days').length, [leads])
-
-  // Weighted pipeline score
-  const pipelineScore = useMemo(() => {
-    const score = leads.reduce((sum, l) => sum + (PIPELINE_POINTS[(l.status || '').trim()] ?? 0), 0)
-    const max = total * 9
-    const pct = max ? score / max : 0
-    return { score, pct }
-  }, [leads, total])
-
-  // Counts by status (for funnel cards)
-  const statusCounts = useMemo(() => {
-    const m: Record<string, number> = {}
-    for (const s of STATUS_ORDER) m[s] = 0
     for (const l of leads) {
-      const s = (l.status || '').trim()
-      if (!s) continue
-      m[s] = (m[s] || 0) + 1
+      const k = statusKey(l.status)
+      for (const s of STAGES) {
+        if (s.match.some((m) => k === m || k.includes(m))) {
+          counts[s.key] += 1
+          break
+        }
+      }
     }
-    return m
+    return counts
+  }, [leads, STAGES])
+
+  const total = leads.length
+  const contacted = stageCounts['Contacted'] || 0
+  const qualified = stageCounts['Qualified'] || 0
+  const sent = stageCounts['Sent To Client'] || 0
+
+  const dropped = useMemo(() => {
+    let c = 0
+    for (const l of leads) {
+      const k = statusKey(l.status)
+      if (DROP_OFF_MATCH.some((m) => k.includes(m))) c++
+    }
+    return c
+  }, [leads, DROP_OFF_MATCH])
+
+  const conversion = useMemo(() => {
+    const contactRate = pct(contacted, total)
+    const qualRate = pct(qualified, Math.max(contacted, 1))
+    const sendRate = pct(sent, Math.max(qualified, 1))
+    const dropRate = pct(dropped, total)
+    return { contactRate, qualRate, sendRate, dropRate }
+  }, [contacted, qualified, sent, dropped, total])
+
+  const pipelineHealth = useMemo(() => {
+    // quick weighted score: contacted=1, qualified=2, pending=2.3, sent=3, looking=1.6, dropoff=-1
+    const pending = stageCounts['Pending Photos'] || 0
+    const looking = stageCounts['Looking'] || 0
+    const score =
+      contacted * 1 +
+      qualified * 2 +
+      pending * 2.3 +
+      sent * 3 +
+      looking * 1.6 +
+      dropped * -1
+
+    // normalise to 0..100 using a soft cap
+    const maxSoft = Math.max(total * 2.2, 1)
+    return clamp(Math.round(((score + maxSoft) / (maxSoft * 2)) * 100), 0, 100)
+  }, [stageCounts, contacted, qualified, sent, dropped, total])
+
+  const leadTrend = useMemo(() => {
+    const days = 14
+    const start = startOfDay(daysAgo(days - 1))
+    const buckets = Array.from({ length: days }).map((_, i) => {
+      const d = new Date(start)
+      d.setDate(d.getDate() + i)
+      return { d, n: 0 }
+    })
+
+    for (const l of leads) {
+      const dt = new Date(l.created_at)
+      if (dt < start) continue
+      const idx = Math.floor((startOfDay(dt).getTime() - start.getTime()) / (1000 * 60 * 60 * 24))
+      if (idx >= 0 && idx < buckets.length) buckets[idx].n++
+    }
+
+    return buckets
   }, [leads])
 
-  const sourceCounts = useMemo(() => {
-    const m: Record<string, number> = {}
+  const sources = useMemo(() => {
+    const map = new Map<string, number>()
     for (const l of leads) {
       const s = (l.source || 'Other').trim() || 'Other'
-      m[s] = (m[s] || 0) + 1
+      map.set(s, (map.get(s) || 0) + 1)
     }
-    return Object.entries(m).sort((a, b) => b[1] - a[1]).slice(0, 6)
+    const arr = Array.from(map.entries())
+      .map(([name, n]) => ({ name, n }))
+      .sort((a, b) => b.n - a.n)
+      .slice(0, 6)
+
+    const max = Math.max(...arr.map((x) => x.n), 1)
+    return { arr, max }
   }, [leads])
 
-  const assigneeStats = useMemo(() => {
-    const m: Record<string, { name: string; total: number; qualified: number; sent: number; pipeline: number }> = {}
+  const topPerformers = useMemo(() => {
+    const map = new Map<
+      string,
+      { rep: string; leads: number; qualified: number; sent: number; score: number }
+    >()
+
     for (const l of leads) {
-      const a = (l.assigned_to || 'Unassigned').trim() || 'Unassigned'
-      if (!m[a]) m[a] = { name: a, total: 0, qualified: 0, sent: 0, pipeline: 0 }
-      m[a].total += 1
-      if (QUALIFICATION_RATE_STATUSES.has((l.status || '').trim())) m[a].qualified += 1
-      if ((l.status || '').trim() === 'Sent To Client') m[a].sent += 1
-      m[a].pipeline += PIPELINE_POINTS[(l.status || '').trim()] ?? 0
-    }
-    return Object.values(m).sort((a, b) => b.pipeline - a.pipeline).slice(0, 8)
-  }, [leads])
+      const rep = (l.assigned_to || 'Unassigned').trim() || 'Unassigned'
+      const k = statusKey(l.status)
 
-  // Trend: last 14 days (created)
-  const trend = useMemo(() => {
-    const days = 14
-    const map: Record<string, number> = {}
-    for (let i = days - 1; i >= 0; i--) {
-      const d = startOfDay(daysAgo(i))
-      const key = d.toISOString().slice(0, 10)
-      map[key] = 0
+      const row = map.get(rep) || { rep, leads: 0, qualified: 0, sent: 0, score: 0 }
+      row.leads += 1
+
+      if (k.includes('qualified')) {
+        row.qualified += 1
+        row.score += 2
+      }
+      if (k.includes('sent')) {
+        row.sent += 1
+        row.score += 3
+      }
+      if (k.includes('contacted')) row.score += 1
+      if (DROP_OFF_MATCH.some((m) => k.includes(m))) row.score -= 1
+
+      map.set(rep, row)
     }
+
+    return Array.from(map.values())
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 4)
+  }, [leads, DROP_OFF_MATCH])
+
+  const actions = useMemo(() => {
+    const now = new Date()
+    const staleCutoff = new Date()
+    staleCutoff.setDate(staleCutoff.getDate() - 2)
+
+    let stale = 0
+    let callbacksDue = 0
+    let vmna5 = 0
+    let dncWeek = 0
+
+    const weekAgo = new Date()
+    weekAgo.setDate(weekAgo.getDate() - 7)
+
     for (const l of leads) {
-      const key = startOfDay(new Date(l.created_at)).toISOString().slice(0, 10)
-      if (key in map) map[key] += 1
+      const created = new Date(l.created_at)
+      const k = statusKey(l.status)
+
+      // stale = older than 2 days, not sent/qualified (tweak to taste)
+      if (created < staleCutoff && !k.includes('sent') && !k.includes('qualified')) stale++
+
+      // callbacks due
+      if (l.callback_at) {
+        const cb = new Date(l.callback_at)
+        if (cb <= now) callbacksDue++
+      }
+
+      // vm/na 5+ days (if your statuses include VM/NA)
+      if ((k.includes('vm') || k.includes('na')) && created < daysAgo(5)) vmna5++
+
+      // dnc this week
+      if (k.includes('dnc') && created >= weekAgo) dncWeek++
     }
-    const labels = Object.keys(map)
-    const values = labels.map((k) => map[k])
-    const max = Math.max(1, ...values)
-    return { labels, values, max }
+
+    return { stale, callbacksDue, vmna5, dncWeek }
   }, [leads])
 
-  // =========================
-  // UI
-  // =========================
+  /* -------------------- UI -------------------- */
+
   return (
     <div style={page}>
-      <Sidebar />
+      <SolarSystemBackground />
 
-      <div style={bgGlowTop} />
-      <div style={bgGlowBottom} />
-
-      <div style={{ ...container, transform: `scale(${UI_SCALE})`, transformOrigin: 'top center' }}>
-        <div style={wrap}>
-          {/* Top Bar */}
-          <div style={topBar}>
-            <div style={titleBlock}>
-              <div style={pill}>ECO4 • Lead Gen Dashboard</div>
-              <div style={h1}>Command Centre</div>
-              <div style={sub}>Volume, workflow, conversion — all in one view.</div>
+      <div style={wrap}>
+        {/* Top bar */}
+        <div style={topBar}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <div style={titleRow}>
+              <div style={badge}>ECO4 • Lead Gen Dashboard</div>
+              <div style={title}>Lead Generation Dashboard</div>
             </div>
+            <div style={subtitle}>Conversion, workflow, pipeline health — in one clean view.</div>
+          </div>
 
-            <div style={topRight}>
-              <div style={seg}>
-                <button style={range === '7d' ? segBtnOn : segBtn} onClick={() => setRange('7d')}>
-                  7D
+          <div style={controls}>
+            <div style={rangeWrap}>
+              {(['7D', '30D', 'ALL'] as TimeRange[]).map((r) => (
+                <button
+                  key={r}
+                  onClick={() => setRange(r)}
+                  style={r === range ? rangeBtnActive : rangeBtn}
+                  title={`Show ${r}`}
+                >
+                  {r}
                 </button>
-                <button style={range === '30d' ? segBtnOn : segBtn} onClick={() => setRange('30d')}>
-                  30D
-                </button>
-                <button style={range === 'all' ? segBtnOn : segBtn} onClick={() => setRange('all')}>
-                  ALL
-                </button>
-              </div>
-
-              <button style={btnSm} onClick={fetchLeads} disabled={loading}>
-                {loading ? 'Loading…' : '↻ Refresh'}
-              </button>
-
-              <button style={btnPrimary} onClick={() => router.push('/leads')}>
-                Open Leads →
-              </button>
+              ))}
             </div>
+
+            <button style={ghostBtn} onClick={handleRefresh} disabled={refreshing} aria-disabled={refreshing}>
+              {refreshing ? 'Refreshing…' : '↻ Refresh'}
+            </button>
+
+            <button style={primaryBtn} onClick={() => router.push('/leads')}>
+              Open Leads →
+            </button>
           </div>
-
-          {errorMsg && (
-            <div style={errorBar}>
-              <b>Supabase error:</b>&nbsp;{errorMsg}
-            </div>
-          )}
-
-          {/* Row 1 */}
-          <div style={grid5}>
-            <KPI title="Total Leads" value={fmtInt(total)} sub={range === 'all' ? 'All time' : `Last ${range}`} />
-            <KPI title="Leads Today" value={fmtInt(todayCount)} sub="Created since midnight" />
-            <KPI title="Contacted" value={fmtInt(contactedCount)} sub={`Rate: ${fmtPct(contactRate)}`} />
-            <KPI title="Qualified" value={fmtInt(qualifiedCount)} sub={`Rate: ${fmtPct(qualificationRate)}`} />
-            <KPI title="Stale Leads" value={fmtInt(staleCount)} sub="New 7d+ OR drop-off statuses" />
-          </div>
-
-          {/* Row 2 */}
-          <div style={grid4}>
-            <KPI tone="cyan" title="Contact Rate" value={fmtPct(contactRate)} sub={`${fmtInt(contactedCount)} in contact statuses`} />
-            <KPI tone="green" title="Qualification Rate" value={fmtPct(qualificationRate)} sub={`${fmtInt(qualifiedCount)} qualified bucket`} />
-            <KPI tone="blue" title="Send Rate" value={fmtPct(sendRate)} sub={`${fmtInt(sentCount)} sent (of qualified)`} />
-            <KPI tone="red" title="Drop-off Rate" value={fmtPct(dropOffRate)} sub={`${fmtInt(dropOffCount)} in drop-off statuses`} />
-          </div>
-
-          {/* Row 3 */}
-          <div style={grid2}>
-            <div style={panel}>
-              <div style={panelHead}>
-                <div style={panelTitle}>Pipeline Funnel</div>
-                <div style={panelHint}>Live counts by key stages</div>
-              </div>
-
-              <div style={funnelRow}>
-                <FunnelBox label="New Lead" value={statusCounts['New Lead'] || 0} />
-                <FunnelBox label="Contacted" value={statusCounts['Contacted'] || 0} />
-                <FunnelBox label="Qualified" value={statusCounts['Qualified'] || 0} />
-                <FunnelBox label="Pending Photos" value={statusCounts['Pending Photos'] || 0} />
-                <FunnelBox label="Sent To Client" value={statusCounts['Sent To Client'] || 0} />
-                <FunnelBox label="Looking for home" value={statusCounts['Looking for home'] || 0} />
-              </div>
-
-              <div style={miniNote}>
-                Your KPI rules: <b>Contact</b> uses your dropdown statuses • <b>Qualification</b> = Qualified/Sent/Looking •{' '}
-                <b>Drop-off</b> = VM5/NA5/NI/Boiler/NoBenefits/DNC
-              </div>
-            </div>
-
-            <div style={panel}>
-              <div style={panelHead}>
-                <div style={panelTitle}>Pipeline Health</div>
-                <div style={panelHint}>Weighted score from current statuses</div>
-              </div>
-
-              <div style={healthWrap}>
-                <div style={healthBig}>{fmtPct(pipelineScore.pct)}</div>
-                <div style={healthSub}>
-                  Score: <b>{fmtInt(pipelineScore.score)}</b> / {fmtInt(total * 9)}
-                </div>
-
-                <div style={barTrack}>
-                  <div style={{ ...barFill, width: `${Math.max(2, Math.round(pipelineScore.pct * 100))}%` }} />
-                </div>
-
-                <div style={riskGrid}>
-                  <RiskItem label="Stale Leads" value={staleCount} hint="New Lead 7d+ OR drop-off statuses" />
-                  <RiskItem label="Callbacks" value={callbackCount} hint="Status: Callback" />
-                  <RiskItem label="VM 5+ days" value={vm5} hint="Drop-off bucket" />
-                  <RiskItem label="NA 5+ days" value={na5} hint="Drop-off bucket" />
-                </div>
-              </div>
-            </div>
-          </div>
-
-          {/* Row 4 */}
-          <div style={grid2}>
-            <div style={panel}>
-              <div style={panelHead}>
-                <div style={panelTitle}>Lead Trend</div>
-                <div style={panelHint}>Last 14 days (created)</div>
-              </div>
-
-              <div style={trendWrap}>
-                {trend.values.map((v, idx) => {
-                  const h = Math.round((v / trend.max) * 100)
-                  return (
-                    <div key={trend.labels[idx]} style={trendCol} title={`${trend.labels[idx]}: ${v}`}>
-                      <div style={{ ...trendBar, height: `${h}%` }} />
-                      <div style={trendLabel}>{trend.labels[idx].slice(5)}</div>
-                    </div>
-                  )
-                })}
-              </div>
-            </div>
-
-            <div style={panel}>
-              <div style={panelHead}>
-                <div style={panelTitle}>Top Sources</div>
-                <div style={panelHint}>Where leads are coming from</div>
-              </div>
-
-              <div style={{ padding: 14 }}>
-                {sourceCounts.length === 0 ? (
-                  <div style={empty}>No source data yet.</div>
-                ) : (
-                  sourceCounts.map(([name, count]) => {
-                    const pct = total ? count / total : 0
-                    return (
-                      <div key={name} style={sourceRow}>
-                        <div style={sourceLeft}>
-                          <div style={sourceName}>{name}</div>
-                          <div style={sourceSmall}>{fmtInt(count)} leads</div>
-                        </div>
-                        <div style={sourceRight}>
-                          <div style={sourcePct}>{fmtPct(pct)}</div>
-                          <div style={barTrackSmall}>
-                            <div style={{ ...barFillSmall, width: `${Math.max(2, Math.round(pct * 100))}%` }} />
-                          </div>
-                        </div>
-                      </div>
-                    )
-                  })
-                )}
-              </div>
-            </div>
-          </div>
-
-          {/* Row 5 */}
-          <div style={panel}>
-            <div style={panelHead}>
-              <div style={panelTitle}>Assignee Leaderboard</div>
-              <div style={panelHint}>Sorted by weighted pipeline score</div>
-            </div>
-
-            <div style={{ padding: 14 }}>
-              {assigneeStats.length === 0 ? (
-                <div style={empty}>No assignee data yet.</div>
-              ) : (
-                <div style={tableWrap}>
-                  <table style={table}>
-                    <thead>
-                      <tr>
-                        <th style={th}>Agent</th>
-                        <th style={th}>Total</th>
-                        <th style={th}>Qualified</th>
-                        <th style={th}>Sent</th>
-                        <th style={thRight}>Pipeline Score</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {assigneeStats.map((a, i) => (
-                        <tr key={a.name} style={{ ...tr, opacity: i === 0 ? 1 : 0.95 }}>
-                          <td style={td}>
-                            <span style={namePill}>{a.name}</span>
-                          </td>
-                          <td style={td}>{fmtInt(a.total)}</td>
-                          <td style={td}>{fmtInt(a.qualified)}</td>
-                          <td style={td}>{fmtInt(a.sent)}</td>
-                          <td style={tdRight}>
-                            <span style={scorePill}>{fmtInt(a.pipeline)}</span>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-            </div>
-          </div>
-
-          <div style={{ height: 22 }} />
         </div>
+
+        {errorMsg && (
+          <div style={errorBar}>
+            <b>Error:</b> {errorMsg}
+          </div>
+        )}
+
+        {/* KPI row */}
+        <div style={kpiRow}>
+          <KpiCard
+            icon="👥"
+            label={`Total Leads (${range === 'ALL' ? 'All time' : range === '7D' ? '7 days' : '30 days'})`}
+            value={loading ? '—' : String(total)}
+            foot={loading ? 'Loading…' : 'Live pipeline volume'}
+          />
+          <KpiCard
+            icon="✅"
+            label="Qualified Leads"
+            value={loading ? '—' : String(qualified)}
+            foot="Ready to convert"
+          />
+          <KpiCard
+            icon="📤"
+            label="Sent to Client"
+            value={loading ? '—' : String(sent)}
+            foot="Awaiting response"
+          />
+          <KpiCard
+            icon="💠"
+            label="Pipeline Health"
+            value={loading ? '—' : `${pipelineHealth}%`}
+            foot={pipelineHealth >= 60 ? 'Optimised' : pipelineHealth >= 35 ? 'Improving' : 'Needs attention'}
+          />
+        </div>
+
+        {/* Main grid */}
+        <div style={grid}>
+          {/* Conversion metrics */}
+          <div style={card}>
+            <div style={cardTitle}>Conversion Metrics</div>
+
+            <MetricRow label="Contact Rate" value={`${conversion.contactRate}%`} dir={conversion.contactRate >= 10 ? 'up' : 'down'} />
+            <MetricRow label="Qualification Rate" value={`${conversion.qualRate}%`} dir={conversion.qualRate >= 10 ? 'up' : 'down'} />
+            <MetricRow label="Send Rate" value={`${conversion.sendRate}%`} dir={conversion.sendRate >= 10 ? 'up' : 'down'} />
+            <MetricRow label="Drop-Off Rate" value={`${conversion.dropRate}%`} dir={conversion.dropRate <= 15 ? 'up' : 'down'} invert />
+          </div>
+
+          {/* Pipeline */}
+          <div style={{ ...card, gridColumn: 'span 2' }}>
+            <div style={cardTitleRow}>
+              <div style={cardTitle}>Lead Pipeline</div>
+              <div style={miniPill}>Live counts by stage</div>
+            </div>
+
+            <div style={pipelineBarWrap}>
+              {STAGES.map((s, idx) => {
+                const n = stageCounts[s.key] || 0
+                const width = total ? clamp((n / total) * 100, 4, 60) : 8
+                return (
+                  <div key={s.key} style={{ ...pipeSeg, flex: width }}>
+                    <div style={pipeTop}>
+                      <div style={pipeLabel}>{s.key}</div>
+                      <div style={pipeNum}>{n}</div>
+                    </div>
+                    <div style={pipeSub}>{idx === 0 ? 'New in flow' : idx === 5 ? 'In progress' : 'Moving stage'}</div>
+                  </div>
+                )
+              })}
+            </div>
+
+            <div style={subGrid}>
+              {/* Trend */}
+              <div style={subCard}>
+                <div style={subTitle}>Lead Trend</div>
+                <div style={sparkWrap}>
+                  <div style={sparkLine}>
+                    {leadTrend.map((b, i) => (
+                      <div
+                        key={i}
+                        title={`${formatShort(b.d)}: ${b.n}`}
+                        style={{
+                          ...sparkBar,
+                          height: `${clamp(b.n * 8, 6, 72)}px`,
+                          opacity: 0.85,
+                        }}
+                      />
+                    ))}
+                  </div>
+                  <div style={sparkAxis}>
+                    {leadTrend.map((b, i) => (i % 2 === 0 ? <div key={i} style={sparkTick}>{formatShort(b.d)}</div> : <div key={i} style={sparkTickBlank} />))}
+                  </div>
+                </div>
+              </div>
+
+              {/* Sources */}
+              <div style={subCard}>
+                <div style={subTitle}>Lead Sources</div>
+                <div style={{ marginTop: 10, display: 'flex', flexDirection: 'column', gap: 10 }}>
+                  {sources.arr.map((s) => (
+                    <div key={s.name} style={srcRow}>
+                      <div style={srcName}>{s.name}</div>
+                      <div style={srcBarWrap}>
+                        <div style={{ ...srcBar, width: `${Math.round((s.n / sources.max) * 100)}%` }} />
+                      </div>
+                      <div style={srcNum}>{s.n}</div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Top performers */}
+          <div style={{ ...card, gridColumn: 'span 2' }}>
+            <div style={cardTitleRow}>
+              <div style={cardTitle}>Top Performers</div>
+              <div style={miniPill}>Agent scoring (weighted)</div>
+            </div>
+
+            <div style={tableWrap}>
+              <table style={table}>
+                <thead>
+                  <tr>
+                    <th style={th}>Agent</th>
+                    <th style={thRight}>Leads</th>
+                    <th style={thRight}>Qualified</th>
+                    <th style={thRight}>Sent</th>
+                    <th style={thRight}>Score</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {topPerformers.length === 0 ? (
+                    <tr>
+                      <td style={td} colSpan={5}>
+                        No performer data yet.
+                      </td>
+                    </tr>
+                  ) : (
+                    topPerformers.map((r) => (
+                      <tr key={r.rep}>
+                        <td style={td}>
+                          <span style={pill}>{r.rep}</span>
+                        </td>
+                        <td style={tdRight}>{r.leads}</td>
+                        <td style={tdRight}>{r.qualified}</td>
+                        <td style={tdRight}>{r.sent}</td>
+                        <td style={tdRight}>
+                          <span style={scorePill}>{r.score}</span>
+                        </td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          {/* Action needed */}
+          <div style={card}>
+            <div style={cardTitleRow}>
+              <div style={cardTitle}>Action Needed</div>
+              <div style={miniPill}>Ops reminders</div>
+            </div>
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 12, marginTop: 10 }}>
+              <ActionLine label="Stale Leads (2+ days)" value={actions.stale} />
+              <ActionLine label="Callbacks Due" value={actions.callbacksDue} />
+              <ActionLine label="VM / NA 5+ days" value={actions.vmna5} />
+              <ActionLine label="DNC This Week" value={actions.dncWeek} />
+            </div>
+          </div>
+        </div>
+
+        <div style={{ height: 36 }} />
       </div>
     </div>
   )
 }
 
-/* -----------------------------
-   Small components
------------------------------- */
+/* -------------------- Small UI components -------------------- */
 
-function KPI({
-  title,
-  value,
-  sub,
-  tone,
-}: {
-  title: string
-  value: string
-  sub?: string
-  tone?: 'cyan' | 'green' | 'blue' | 'red'
-}) {
-  const ring =
-    tone === 'green'
-      ? 'rgba(140,255,120,0.28)'
-      : tone === 'blue'
-      ? 'rgba(0,200,255,0.28)'
-      : tone === 'red'
-      ? 'rgba(255,70,70,0.26)'
-      : 'rgba(0,255,255,0.28)'
-
+function KpiCard(props: { icon: string; label: string; value: string; foot: string }) {
   return (
-    <div style={{ ...kpi, border: `1px solid ${ring}` }}>
-      <div style={kpiTitle}>{title}</div>
-      <div style={kpiValue}>{value}</div>
-      {sub && <div style={kpiSub}>{sub}</div>}
+    <div style={kpiCard}>
+      <div style={kpiIcon}>{props.icon}</div>
+      <div style={kpiValue}>{props.value}</div>
+      <div style={kpiLabel}>{props.label}</div>
+      <div style={kpiFoot}>{props.foot}</div>
     </div>
   )
 }
 
-function FunnelBox({ label, value }: { label: string; value: number }) {
+function MetricRow(props: { label: string; value: string; dir: 'up' | 'down'; invert?: boolean }) {
+  const up = props.dir === 'up'
+  const arrow = up ? '▲' : '▼'
+  const vibe = props.invert ? !up : up
   return (
-    <div style={funnelBox}>
-      <div style={funnelValue}>{value}</div>
-      <div style={funnelLabel}>{label}</div>
-    </div>
-  )
-}
-
-function RiskItem({ label, value, hint }: { label: string; value: number; hint: string }) {
-  const hot = value >= 20
-  const warm = value >= 10 && value < 20
-  return (
-    <div
-      style={{
-        ...riskItem,
-        borderColor: hot ? 'rgba(255,70,70,0.35)' : warm ? 'rgba(255,210,90,0.30)' : 'rgba(0,255,255,0.18)',
-      }}
-    >
-      <div style={riskTop}>
-        <div style={riskLabel}>{label}</div>
-        <div style={riskValue}>{value}</div>
+    <div style={metricRow}>
+      <div style={metricLabel}>{props.label}</div>
+      <div style={metricRight}>
+        <div style={metricValue}>{props.value}</div>
+        <div style={{ ...metricArrow, opacity: 0.95 }}>{arrow}</div>
+        <div style={{ ...metricGlow, opacity: vibe ? 0.9 : 0.35 }} />
       </div>
-      <div style={riskHint}>{hint}</div>
     </div>
   )
 }
 
-/* -----------------------------
-   Styles (match your CRM vibe)
------------------------------- */
+function ActionLine(props: { label: string; value: number }) {
+  return (
+    <div style={actionRow}>
+      <div style={actionLabel}>{props.label}</div>
+      <div style={actionValue}>{props.value}</div>
+    </div>
+  )
+}
 
-const page: CSSProperties = {
+/* -------------------- Styles -------------------- */
+
+const page: React.CSSProperties = {
   minHeight: '100vh',
-  background:
-    'radial-gradient(1200px 600px at 50% 0%, rgba(0,255,255,0.08), transparent 55%), linear-gradient(180deg, #020B22 0%, #01071A 45%, #01051A 100%)',
-  color: '#fff',
-  fontFamily: 'Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif',
-  fontWeight: 800,
   position: 'relative',
+  background:
+    'radial-gradient(1200px 600px at 50% 0%, rgba(0,255,255,0.10), transparent 55%), linear-gradient(180deg, #020B22 0%, #01071A 45%, #01051A 100%)',
+  color: '#fff',
   overflowX: 'hidden',
 }
 
-const bgGlowTop: CSSProperties = {
-  position: 'absolute',
-  top: -220,
-  left: '50%',
-  transform: 'translateX(-50%)',
-  width: 1100,
-  height: 450,
-  background: 'radial-gradient(circle, rgba(0,255,255,0.18), transparent 30%)',
-  filter: 'blur(28px)',
-  pointerEvents: 'none',
-}
-
-const bgGlowBottom: CSSProperties = {
-  position: 'absolute',
-  bottom: -260,
-  left: '50%',
-  transform: 'translateX(-50%)',
-  width: 1100,
-  height: 520,
-  background: 'radial-gradient(circle, rgba(0,200,255,0.14), transparent 65%)',
-  filter: 'blur(30px)',
-  pointerEvents: 'none',
-}
-
-const container: CSSProperties = {
+const wrap: React.CSSProperties = {
   position: 'relative',
-  width: '100%',
-  maxWidth: 2400,
+  zIndex: 1,
+  maxWidth: 1480,
   margin: '0 auto',
-  padding: '26px 18px',
+  padding: '22px 16px',
 }
 
-const wrap: CSSProperties = { maxWidth: 1400, margin: '0 auto' }
-
-const topBar: CSSProperties = {
+const topBar: React.CSSProperties = {
+  padding: 16,
+  borderRadius: 18,
+  border: '1px solid rgba(0,255,255,0.22)',
+  background: 'linear-gradient(180deg, rgba(255,255,255,0.06), rgba(255,255,255,0.03))',
+  boxShadow: '0 20px 70px rgba(0,0,0,0.55), 0 0 40px rgba(0,255,255,0.10)',
   display: 'flex',
+  alignItems: 'center',
   justifyContent: 'space-between',
-  alignItems: 'flex-end',
-  gap: 14,
+  gap: 12,
   flexWrap: 'wrap',
-  marginBottom: 14,
 }
 
-const titleBlock: CSSProperties = { display: 'flex', flexDirection: 'column', gap: 6 }
-const pill: CSSProperties = {
-  display: 'inline-flex',
-  width: 'fit-content',
+const titleRow: React.CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  gap: 10,
+  flexWrap: 'wrap',
+}
+
+const badge: React.CSSProperties = {
   padding: '6px 10px',
   borderRadius: 999,
-  background: 'rgba(0,255,255,0.10)',
-  border: '1px solid rgba(0,255,255,0.28)',
+  border: '1px solid rgba(0,255,255,0.22)',
+  background: 'rgba(0,255,255,0.08)',
   fontWeight: 1000,
   fontSize: 12,
-  letterSpacing: 0.2,
+  color: 'rgba(210,255,255,0.95)',
 }
 
-const h1: CSSProperties = { fontSize: 26, fontWeight: 1100, letterSpacing: 0.2, lineHeight: 1.05 }
-const sub: CSSProperties = { fontSize: 12.5, fontWeight: 900, opacity: 0.75 }
+const title: React.CSSProperties = { fontSize: 18, fontWeight: 1000, letterSpacing: 0.2 }
+const subtitle: React.CSSProperties = { opacity: 0.75, fontWeight: 850, fontSize: 12.5 }
 
-const topRight: CSSProperties = { display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }
+const controls: React.CSSProperties = {
+  display: 'flex',
+  gap: 10,
+  alignItems: 'center',
+  justifyContent: 'flex-end',
+  flexWrap: 'wrap',
+}
 
-const seg: CSSProperties = {
+const rangeWrap: React.CSSProperties = {
   display: 'inline-flex',
+  gap: 8,
+  padding: 6,
+  borderRadius: 999,
+  border: '1px solid rgba(0,255,255,0.18)',
+  background: 'rgba(0,0,0,0.25)',
+}
+
+const rangeBtn: React.CSSProperties = {
+  padding: '8px 12px',
   borderRadius: 999,
   border: '1px solid rgba(255,255,255,0.12)',
   background: 'rgba(255,255,255,0.05)',
-  overflow: 'hidden',
-}
-
-const segBtn: CSSProperties = {
-  height: 34,
-  padding: '0 12px',
-  border: 'none',
-  background: 'transparent',
-  color: 'rgba(255,255,255,0.85)',
-  fontWeight: 1000,
+  color: '#fff',
+  fontWeight: 950,
   cursor: 'pointer',
 }
 
-const segBtnOn: CSSProperties = {
-  ...segBtn,
-  background: 'rgba(0,255,255,0.14)',
-  color: 'rgba(255,255,255,0.98)',
+const rangeBtnActive: React.CSSProperties = {
+  ...rangeBtn,
+  border: '1px solid rgba(0,255,255,0.45)',
+  background: 'rgba(0,255,255,0.12)',
+  boxShadow: '0 0 18px rgba(0,255,255,0.10)',
 }
 
-const btnSm: CSSProperties = {
-  height: 34,
+const ghostBtn: React.CSSProperties = {
+  height: 38,
   padding: '0 12px',
   borderRadius: 12,
-  fontWeight: 1000,
-  fontSize: 12.5,
+  fontWeight: 950,
   cursor: 'pointer',
   border: '1px solid rgba(255,255,255,0.14)',
   background: 'rgba(255,255,255,0.06)',
   color: '#fff',
 }
 
-const btnPrimary: CSSProperties = {
-  ...btnSm,
+const primaryBtn: React.CSSProperties = {
   height: 38,
-  border: '1px solid rgba(0,255,255,0.55)',
-  background: 'linear-gradient(135deg, rgba(0,255,255,0.95), rgba(0,140,255,0.90))',
-  boxShadow: '0 0 26px rgba(0,255,255,0.18)',
-  color: '#001122',
-  fontWeight: 1100,
+  padding: '0 14px',
+  borderRadius: 12,
+  fontWeight: 1000,
+  cursor: 'pointer',
+  border: '1px solid rgba(0,255,255,0.35)',
+  background: 'rgba(0,255,255,0.14)',
+  color: '#fff',
+  boxShadow: '0 0 18px rgba(0,255,255,0.12)',
 }
 
-const errorBar: CSSProperties = {
-  marginTop: 10,
-  marginBottom: 10,
+const errorBar: React.CSSProperties = {
+  marginTop: 14,
   padding: '12px 14px',
   borderRadius: 12,
   background: 'rgba(255,40,40,0.12)',
   border: '1px solid rgba(255,40,40,0.28)',
-  color: 'rgba(255,230,230,0.98)',
   fontWeight: 900,
 }
 
-const grid5: CSSProperties = {
-  display: 'grid',
-  gridTemplateColumns: 'repeat(5, minmax(0, 1fr))',
-  gap: 12,
-  marginTop: 10,
-}
-const grid4: CSSProperties = {
+const kpiRow: React.CSSProperties = {
+  marginTop: 14,
   display: 'grid',
   gridTemplateColumns: 'repeat(4, minmax(0, 1fr))',
   gap: 12,
-  marginTop: 12,
-}
-const grid2: CSSProperties = {
-  display: 'grid',
-  gridTemplateColumns: '1fr 1fr',
-  gap: 12,
-  marginTop: 12,
 }
 
-const panel: CSSProperties = {
-  borderRadius: 18,
+const kpiCard: React.CSSProperties = {
+  borderRadius: 16,
+  border: '1px solid rgba(0,255,255,0.18)',
   background: 'linear-gradient(180deg, rgba(255,255,255,0.06), rgba(255,255,255,0.03))',
-  border: '1px solid rgba(0,255,255,0.22)',
-  boxShadow: '0 20px 70px rgba(0,0,0,0.55), 0 0 0 1px rgba(0,255,255,0.08) inset',
+  boxShadow: '0 18px 60px rgba(0,0,0,0.55)',
+  padding: 14,
+  position: 'relative',
   overflow: 'hidden',
 }
 
-const panelHead: CSSProperties = {
-  padding: '14px 16px',
-  borderBottom: '1px solid rgba(0,255,255,0.16)',
-  background: 'rgba(0,0,0,0.18)',
-}
-const panelTitle: CSSProperties = { fontWeight: 1100, letterSpacing: 0.2 }
-const panelHint: CSSProperties = { marginTop: 2, fontSize: 12, fontWeight: 900, opacity: 0.75 }
+const kpiIcon: React.CSSProperties = { fontSize: 18, opacity: 0.95 }
+const kpiValue: React.CSSProperties = { marginTop: 8, fontSize: 26, fontWeight: 1100 }
+const kpiLabel: React.CSSProperties = { marginTop: 2, fontSize: 12, opacity: 0.85, fontWeight: 900 }
+const kpiFoot: React.CSSProperties = { marginTop: 8, fontSize: 12, opacity: 0.7, fontWeight: 850 }
 
-const kpi: CSSProperties = {
+const grid: React.CSSProperties = {
+  marginTop: 12,
+  display: 'grid',
+  gridTemplateColumns: '1.1fr 1.5fr 1.0fr',
+  gap: 12,
+  alignItems: 'start',
+}
+
+const card: React.CSSProperties = {
   borderRadius: 18,
-  background: 'linear-gradient(180deg, rgba(255,255,255,0.06), rgba(255,255,255,0.03))',
   border: '1px solid rgba(0,255,255,0.22)',
-  boxShadow: '0 18px 60px rgba(0,0,0,0.40), 0 0 0 1px rgba(0,255,255,0.08) inset',
+  background: 'linear-gradient(180deg, rgba(255,255,255,0.06), rgba(255,255,255,0.03))',
+  boxShadow: '0 20px 70px rgba(0,0,0,0.55)',
   padding: 14,
+  overflow: 'hidden',
 }
-const kpiTitle: CSSProperties = { fontSize: 12, fontWeight: 1000, opacity: 0.8 }
-const kpiValue: CSSProperties = { marginTop: 8, fontSize: 28, fontWeight: 1200, letterSpacing: 0.2, lineHeight: 1 }
-const kpiSub: CSSProperties = { marginTop: 8, fontSize: 12, fontWeight: 900, opacity: 0.75 }
 
-const funnelRow: CSSProperties = { display: 'grid', gridTemplateColumns: 'repeat(6, 1fr)', gap: 10, padding: 14 }
-const funnelBox: CSSProperties = {
+const cardTitle: React.CSSProperties = { fontWeight: 1100, fontSize: 13, letterSpacing: 0.3, opacity: 0.95 }
+const cardTitleRow: React.CSSProperties = { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10 }
+const miniPill: React.CSSProperties = {
+  padding: '5px 10px',
+  borderRadius: 999,
+  border: '1px solid rgba(0,255,255,0.18)',
+  background: 'rgba(0,0,0,0.22)',
+  fontWeight: 950,
+  fontSize: 11,
+  opacity: 0.85,
+}
+
+const metricRow: React.CSSProperties = {
+  marginTop: 12,
+  padding: '10px 12px',
+  borderRadius: 14,
+  border: '1px solid rgba(255,255,255,0.10)',
+  background: 'rgba(0,0,0,0.18)',
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'space-between',
+  gap: 10,
+  position: 'relative',
+  overflow: 'hidden',
+}
+
+const metricLabel: React.CSSProperties = { fontWeight: 950, opacity: 0.9 }
+const metricRight: React.CSSProperties = { display: 'flex', alignItems: 'center', gap: 8, position: 'relative' }
+const metricValue: React.CSSProperties = { fontWeight: 1100 }
+const metricArrow: React.CSSProperties = { fontWeight: 1100, fontSize: 12 }
+const metricGlow: React.CSSProperties = {
+  position: 'absolute',
+  right: -40,
+  top: -50,
+  width: 110,
+  height: 110,
+  background: 'radial-gradient(circle, rgba(0,255,255,0.22), transparent 60%)',
+  filter: 'blur(10px)',
+  pointerEvents: 'none',
+}
+
+const pipelineBarWrap: React.CSSProperties = {
+  marginTop: 12,
+  borderRadius: 16,
+  border: '1px solid rgba(255,255,255,0.10)',
+  background: 'rgba(0,0,0,0.18)',
+  overflowX: 'auto',
+  display: 'flex',
+  gap: 10,
+  padding: 10,
+}
+
+const pipeSeg: React.CSSProperties = {
+  minWidth: 170,
+  borderRadius: 14,
+  border: '1px solid rgba(0,255,255,0.18)',
+  background: 'linear-gradient(180deg, rgba(0,255,255,0.10), rgba(255,255,255,0.03))',
+  padding: 10,
+}
+
+const pipeTop: React.CSSProperties = { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10 }
+const pipeLabel: React.CSSProperties = { fontWeight: 1000, fontSize: 12, opacity: 0.95 }
+const pipeNum: React.CSSProperties = { fontWeight: 1200, fontSize: 18 }
+const pipeSub: React.CSSProperties = { marginTop: 6, fontSize: 11.5, opacity: 0.75, fontWeight: 850 }
+
+const subGrid: React.CSSProperties = {
+  marginTop: 12,
+  display: 'grid',
+  gridTemplateColumns: '1.2fr 1fr',
+  gap: 12,
+}
+
+const subCard: React.CSSProperties = {
   borderRadius: 16,
   border: '1px solid rgba(255,255,255,0.10)',
   background: 'rgba(0,0,0,0.18)',
   padding: 12,
 }
-const funnelValue: CSSProperties = { fontSize: 22, fontWeight: 1200 }
-const funnelLabel: CSSProperties = { marginTop: 4, fontSize: 12, fontWeight: 900, opacity: 0.75 }
-const miniNote: CSSProperties = { padding: '0 14px 14px 14px', fontSize: 12, fontWeight: 900, opacity: 0.75 }
 
-const healthWrap: CSSProperties = { padding: 14 }
-const healthBig: CSSProperties = { fontSize: 44, fontWeight: 1300, letterSpacing: 0.3 }
-const healthSub: CSSProperties = { marginTop: 6, fontSize: 12.5, fontWeight: 950, opacity: 0.8 }
+const subTitle: React.CSSProperties = { fontWeight: 1100, fontSize: 12.5, opacity: 0.95 }
 
-const barTrack: CSSProperties = {
-  marginTop: 12,
-  height: 12,
-  borderRadius: 999,
-  background: 'rgba(0,0,0,0.35)',
-  border: '1px solid rgba(255,255,255,0.10)',
-  overflow: 'hidden',
-}
-const barFill: CSSProperties = {
-  height: '100%',
-  borderRadius: 999,
-  background: 'linear-gradient(90deg, rgba(0,255,255,0.95), rgba(0,140,255,0.95))',
-  boxShadow: '0 0 24px rgba(0,255,255,0.22)',
-}
-
-const riskGrid: CSSProperties = { marginTop: 12, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }
-const riskItem: CSSProperties = {
-  borderRadius: 14,
-  border: '1px solid rgba(0,255,255,0.18)',
-  background: 'rgba(0,0,0,0.18)',
-  padding: 10,
-}
-const riskTop: CSSProperties = { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10 }
-const riskLabel: CSSProperties = { fontSize: 12, fontWeight: 1000, opacity: 0.85 }
-const riskValue: CSSProperties = { fontSize: 18, fontWeight: 1200 }
-const riskHint: CSSProperties = { marginTop: 6, fontSize: 11.5, fontWeight: 900, opacity: 0.7 }
-
-const trendWrap: CSSProperties = { padding: 14, display: 'grid', gridTemplateColumns: 'repeat(14, 1fr)', gap: 8, alignItems: 'end', height: 220 }
-const trendCol: CSSProperties = { display: 'flex', flexDirection: 'column', gap: 6, alignItems: 'center' }
-const trendBar: CSSProperties = {
-  width: '100%',
+const sparkWrap: React.CSSProperties = { marginTop: 10 }
+const sparkLine: React.CSSProperties = { display: 'flex', alignItems: 'flex-end', gap: 6, height: 84 }
+const sparkBar: React.CSSProperties = {
+  width: 12,
   borderRadius: 10,
-  background: 'linear-gradient(180deg, rgba(0,255,255,0.90), rgba(0,140,255,0.85))',
-  boxShadow: '0 0 22px rgba(0,255,255,0.18)',
-  minHeight: 8,
+  background: 'rgba(0,255,255,0.20)',
+  border: '1px solid rgba(0,255,255,0.24)',
+  boxShadow: '0 0 18px rgba(0,255,255,0.08)',
 }
-const trendLabel: CSSProperties = { fontSize: 10.5, fontWeight: 900, opacity: 0.65 }
+const sparkAxis: React.CSSProperties = { marginTop: 8, display: 'flex', gap: 6 }
+const sparkTick: React.CSSProperties = { width: 12, fontSize: 10, opacity: 0.65, textAlign: 'center' }
+const sparkTickBlank: React.CSSProperties = { width: 12 }
 
-const sourceRow: CSSProperties = {
-  display: 'flex',
-  justifyContent: 'space-between',
-  alignItems: 'center',
-  gap: 12,
-  padding: '10px 10px',
-  borderRadius: 14,
-  border: '1px solid rgba(255,255,255,0.08)',
-  background: 'rgba(0,0,0,0.18)',
-  marginBottom: 10,
-}
-const sourceLeft: CSSProperties = { display: 'flex', flexDirection: 'column', gap: 2 }
-const sourceName: CSSProperties = { fontWeight: 1100 }
-const sourceSmall: CSSProperties = { fontSize: 12, fontWeight: 900, opacity: 0.72 }
-const sourceRight: CSSProperties = { minWidth: 220, display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 6 }
-const sourcePct: CSSProperties = { fontSize: 12.5, fontWeight: 1100, opacity: 0.9 }
-const barTrackSmall: CSSProperties = {
-  width: '100%',
+const srcRow: React.CSSProperties = { display: 'grid', gridTemplateColumns: '1fr 2.2fr auto', gap: 10, alignItems: 'center' }
+const srcName: React.CSSProperties = { fontWeight: 950, opacity: 0.9, fontSize: 12 }
+const srcBarWrap: React.CSSProperties = {
   height: 10,
   borderRadius: 999,
-  background: 'rgba(0,0,0,0.35)',
   border: '1px solid rgba(255,255,255,0.10)',
+  background: 'rgba(255,255,255,0.04)',
   overflow: 'hidden',
 }
-const barFillSmall: CSSProperties = { height: '100%', borderRadius: 999, background: 'rgba(0,255,255,0.65)' }
+const srcBar: React.CSSProperties = { height: '100%', borderRadius: 999, background: 'rgba(0,255,255,0.32)' }
+const srcNum: React.CSSProperties = { fontWeight: 1100, opacity: 0.9, fontSize: 12 }
 
-const empty: CSSProperties = { padding: 14, fontWeight: 950, opacity: 0.75 }
-
-const tableWrap: CSSProperties = { width: '100%', overflowX: 'auto' }
-const table: CSSProperties = { width: '100%', borderCollapse: 'separate', borderSpacing: 0, tableLayout: 'fixed' }
-const th: CSSProperties = {
+const tableWrap: React.CSSProperties = { marginTop: 12, overflowX: 'auto' }
+const table: React.CSSProperties = { width: '100%', minWidth: 700, borderCollapse: 'separate', borderSpacing: 0 }
+const th: React.CSSProperties = {
   textAlign: 'left',
-  fontWeight: 1000,
+  fontWeight: 1100,
   fontSize: 12,
   letterSpacing: 0.45,
   textTransform: 'uppercase',
   padding: '12px 10px',
   color: 'rgba(200,255,255,0.95)',
   borderBottom: '1px solid rgba(0,255,255,0.18)',
-}
-const thRight: CSSProperties = { ...th, textAlign: 'right' }
-const tr: CSSProperties = {}
-const td: CSSProperties = {
-  padding: '12px 10px',
-  borderBottom: '1px solid rgba(255,255,255,0.06)',
-  fontWeight: 950,
-  overflow: 'hidden',
-  textOverflow: 'ellipsis',
   whiteSpace: 'nowrap',
 }
-const tdRight: CSSProperties = { ...td, textAlign: 'right' }
+const thRight: React.CSSProperties = { ...th, textAlign: 'right' }
+const td: React.CSSProperties = {
+  padding: '10px 10px',
+  borderBottom: '1px solid rgba(255,255,255,0.07)',
+  fontWeight: 900,
+  whiteSpace: 'nowrap',
+}
+const tdRight: React.CSSProperties = { ...td, textAlign: 'right' }
 
-const namePill: CSSProperties = {
+const pill: React.CSSProperties = {
   display: 'inline-flex',
   padding: '4px 10px',
   borderRadius: 999,
-  border: '1px solid rgba(0,255,255,0.24)',
-  background: 'rgba(0,255,255,0.08)',
+  background: 'rgba(0,255,255,0.10)',
+  border: '1px solid rgba(0,255,255,0.30)',
+  fontWeight: 1000,
+}
+
+const scorePill: React.CSSProperties = {
+  display: 'inline-flex',
+  padding: '4px 10px',
+  borderRadius: 999,
+  background: 'rgba(255,255,255,0.06)',
+  border: '1px solid rgba(255,255,255,0.14)',
   fontWeight: 1100,
 }
-const scorePill: CSSProperties = {
-  display: 'inline-flex',
-  padding: '4px 10px',
-  borderRadius: 999,
-  border: '1px solid rgba(255,255,255,0.12)',
-  background: 'rgba(255,255,255,0.06)',
-  fontWeight: 1100,
+
+const actionRow: React.CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'space-between',
+  padding: '10px 12px',
+  borderRadius: 14,
+  border: '1px solid rgba(255,255,255,0.10)',
+  background: 'rgba(0,0,0,0.18)',
+}
+const actionLabel: React.CSSProperties = { fontWeight: 950, opacity: 0.9 }
+const actionValue: React.CSSProperties = { fontWeight: 1200 }
+
+/* -------------------- small responsiveness -------------------- */
+const mq = typeof window !== 'undefined' ? window.innerWidth : 1200
+if (mq && mq < 1100) {
+  kpiRow.gridTemplateColumns = 'repeat(2, minmax(0, 1fr))'
+  grid.gridTemplateColumns = '1fr'
+  subGrid.gridTemplateColumns = '1fr'
 }

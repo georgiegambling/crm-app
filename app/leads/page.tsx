@@ -6,9 +6,9 @@ import { useRouter } from 'next/navigation'
 import Sidebar from '@/components/Sidebar'
 
 /**
- * ✅ Ensure these columns exist in your Supabase `leads` table:
+ * ✅ Supabase columns needed in `leads`:
  * - id (uuid)
- * - lead_ref (text)   (optional but recommended)
+ * - lead_ref (text)   (optional)
  * - full_name (text)
  * - phone (text)
  * - email (text)
@@ -17,8 +17,11 @@ import Sidebar from '@/components/Sidebar'
  * - assigned_to (text) (optional)
  * - created_at (timestamptz)
  * - notes (text) (optional)
- * - callback_at (timestamptz) (optional)   ✅ for callbacks
- * - callback_note (text) (optional)        ✅ for callbacks
+ * - callback_at (timestamptz) (optional)
+ * - callback_note (text) (optional)
+ * - sent_by_name (text) (optional)        ✅ when status = Sent To Client
+ * - sent_to_client (text) (optional)      ✅ when status = Sent To Client
+ * - prospect_by_name (text) (optional)    ✅ when status = Prospect Client
  *
  * ✅ Notes history table: `lead_notes`
  * - id (uuid)
@@ -44,6 +47,11 @@ type Lead = {
   notes: string | null
   callback_at?: string | null
   callback_note?: string | null
+
+  // ✅ NEW
+  sent_by_name?: string | null
+  sent_to_client?: string | null
+  prospect_by_name?: string | null
 }
 
 type LeadNote = {
@@ -54,11 +62,12 @@ type LeadNote = {
 }
 
 /** ✅ Sheet system */
-type SheetKey = 'ALL' | 'ACTIVE' | 'ARCHIVE'
+type SheetKey = 'ALL' | 'ACTIVE' | 'ARCHIVE' | 'CLIENTS' | 'PROSPECTS'
 const STATUS_ALL = '__ALL__'
 
 const STATUS_OPTIONS = [
   'New Lead',
+  'Prospect Client',
   'Contacted',
   'Qualified',
   'Pending Photos',
@@ -69,21 +78,31 @@ const STATUS_OPTIONS = [
   'No Benefits',
   'Dead Number',
   'Not Interested',
+
+  // ✅ stay ACTIVE (not archive)
   'Voicemail',
   'No Answer',
+
   'VM 5+ days',
   'NA 5+ days',
 ] as const
 
-/** ✅ Active vs Archive buckets (sheets) */
+/** ✅ Active vs Archive buckets (sheets)
+ *  - Voicemail + No Answer are ACTIVE (your request)
+ *  - Clients tab = Sent To Client
+ *  - Prospects tab = Prospect Client
+ */
 const ACTIVE_STATUSES = [
   'New Lead',
+  'Prospect Client',
   'Contacted',
   'Qualified',
   'Pending Photos',
   'Sent To Client',
   'Looking for home',
   'Callback',
+  'Voicemail',
+  'No Answer',
 ] as const
 
 const ARCHIVE_STATUSES = [
@@ -91,8 +110,6 @@ const ARCHIVE_STATUSES = [
   'No Benefits',
   'Dead Number',
   'Not Interested',
-  'Voicemail',
-  'No Answer',
   'VM 5+ days',
   'NA 5+ days',
 ] as const
@@ -150,13 +167,12 @@ function toLocalInputValue(iso: string) {
     const d = new Date(iso)
     const tzOffset = d.getTimezoneOffset() * 60000
     const local = new Date(d.getTime() - tzOffset)
-    return local.toISOString().slice(0, 16) // YYYY-MM-DDTHH:mm
+    return local.toISOString().slice(0, 16)
   } catch {
     return ''
   }
 }
 function localInputToIso(v: string) {
-  // v: "YYYY-MM-DDTHH:mm" (local time)
   const d = new Date(v)
   if (Number.isNaN(d.getTime())) return null
   return d.toISOString()
@@ -164,11 +180,7 @@ function localInputToIso(v: string) {
 
 const NoteIcon = ({ size = 16 }: { size?: number }) => (
   <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden="true">
-    <path
-      d="M7 3h7l3 3v15a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Z"
-      stroke="currentColor"
-      strokeWidth="1.8"
-    />
+    <path d="M7 3h7l3 3v15a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Z" stroke="currentColor" strokeWidth="1.8" />
     <path d="M14 3v4a1 1 0 0 0 1 1h4" stroke="currentColor" strokeWidth="1.8" />
     <path d="M8 12h8M8 16h8M8 8h4" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
   </svg>
@@ -228,11 +240,11 @@ export default function LeadsPage() {
   const [savingEdit, setSavingEdit] = useState(false)
 
   // =========================
-  // ✅ Callback overlay (STEP 2–4)
+  // ✅ Callback overlay
   // =========================
   const [cbOpen, setCbOpen] = useState(false)
   const [cbLead, setCbLead] = useState<Lead | null>(null)
-  const [cbWhen, setCbWhen] = useState('') // datetime-local
+  const [cbWhen, setCbWhen] = useState('')
   const [cbNote, setCbNote] = useState('')
   const [cbSaving, setCbSaving] = useState(false)
 
@@ -281,17 +293,102 @@ export default function LeadsPage() {
   }
 
   // =========================
-  // ✅ Status dropdown quick update (STEP 3)
+  // ✅ Sent To Client / Prospect overlay (YOUR RULES)
+  //   - Sent To Client: must pick staff/admin + must enter "sent to"
+  //   - Prospect Client: must pick staff/admin only
+  // =========================
+  const [spOpen, setSpOpen] = useState(false)
+  const [spLead, setSpLead] = useState<Lead | null>(null)
+  const [spMode, setSpMode] = useState<'SENT' | 'PROSPECT'>('SENT')
+  const [spStaff, setSpStaff] = useState('')
+  const [spSentTo, setSpSentTo] = useState('')
+  const [spSaving, setSpSaving] = useState(false)
+
+  // ✅ Replace with your real staff/admin names (or wire this to profiles table later)
+  const STAFF_OPTIONS = ['Georgie', 'Admin', 'Staff 1', 'Staff 2'] as const
+
+  const openSentProspectModal = (lead: Lead, mode: 'SENT' | 'PROSPECT') => {
+    setSpLead(lead)
+    setSpMode(mode)
+    setSpStaff(mode === 'SENT' ? (lead.sent_by_name || '') : (lead.prospect_by_name || ''))
+    setSpSentTo(mode === 'SENT' ? (lead.sent_to_client || '') : '')
+    setSpOpen(true)
+  }
+
+  const closeSentProspectModal = () => {
+    setSpOpen(false)
+    setSpLead(null)
+    setSpStaff('')
+    setSpSentTo('')
+    setSpSaving(false)
+  }
+
+  const saveSentProspect = async () => {
+    if (!spLead) return
+    const staff = spStaff.trim()
+    const sentTo = spSentTo.trim()
+
+    if (!staff) return alert('Select the staff/admin name.')
+    if (spMode === 'SENT' && !sentTo) return alert('Enter who it was sent to.')
+
+    setSpSaving(true)
+
+    const payload: any =
+      spMode === 'SENT'
+        ? { status: 'Sent To Client', sent_by_name: staff, sent_to_client: sentTo }
+        : { status: 'Prospect Client', prospect_by_name: staff }
+
+    const { error } = await supabase.from('leads').update(payload).eq('id', spLead.id)
+
+    if (error) {
+      setSpSaving(false)
+      alert(`Failed to save: ${error.message}`)
+      return
+    }
+
+    setLeads((prev) =>
+      prev.map((l) =>
+        l.id === spLead.id
+          ? {
+              ...l,
+              status: payload.status,
+              ...(spMode === 'SENT' ? { sent_by_name: staff, sent_to_client: sentTo } : { prospect_by_name: staff }),
+            }
+          : l
+      )
+    )
+
+    setSpSaving(false)
+    closeSentProspectModal()
+    alert('✅ Saved.')
+  }
+
+  // =========================
+  // ✅ Status dropdown quick update
+  //   - Callback opens callback overlay
+  //   - Sent To Client opens sent overlay
+  //   - Prospect Client opens prospect overlay
   // =========================
   const updateLeadStatusQuick = async (lead: Lead, nextStatus: string) => {
-    // If user selected Callback → open overlay and do NOT change status yet
-    if (nextStatus.toLowerCase() === 'callback') {
+    const ns = (nextStatus || '').toLowerCase()
+
+    if (ns === 'callback') {
       openCallbackModal(lead)
       return
     }
 
-    // If leaving Callback, clear callback fields so they don’t linger
-    const leavingCallback = (lead.status || '').toLowerCase() === 'callback' && nextStatus.toLowerCase() !== 'callback'
+    if (ns === 'sent to client') {
+      openSentProspectModal(lead, 'SENT')
+      return
+    }
+
+    if (ns === 'prospect client') {
+      openSentProspectModal(lead, 'PROSPECT')
+      return
+    }
+
+    // If leaving Callback, clear callback fields
+    const leavingCallback = (lead.status || '').toLowerCase() === 'callback' && ns !== 'callback'
     const payload: any = { status: nextStatus }
     if (leavingCallback) {
       payload.callback_at = null
@@ -309,9 +406,7 @@ export default function LeadsPage() {
   }
 
   // =========================
-  // ✅ Callback alerts inside CRM (STEP 5)
-  // - runs while this page is open
-  // - avoids repeat alerts using localStorage
+  // ✅ Callback alerts inside CRM
   // =========================
   const alertedRef = useRef<Set<string>>(new Set())
   useEffect(() => {
@@ -327,7 +422,7 @@ export default function LeadsPage() {
   useEffect(() => {
     const tick = () => {
       const now = Date.now()
-      const windowMs = 60 * 1000 // alert when due within next 1 min (or overdue)
+      const windowMs = 60 * 1000
 
       const due = leads
         .filter((l) => (l.status || '').toLowerCase() === 'callback' && !!l.callback_at)
@@ -351,7 +446,7 @@ export default function LeadsPage() {
         const when = l.callback_at ? formatDateTime(l.callback_at) : ''
         const note = l.callback_note ? `\n\nNote: ${l.callback_note}` : ''
         alert(`⏰ CALLBACK DUE\n\n${ref} • ${l.full_name}\n${when}${note}`)
-        break // one alert per tick to avoid spam
+        break
       }
     }
 
@@ -392,7 +487,9 @@ export default function LeadsPage() {
     setErrorMsg(null)
     const { data, error } = await supabase
       .from('leads')
-      .select('id, lead_ref, full_name, phone, email, status, source, assigned_to, created_at, notes, callback_at, callback_note')
+      .select(
+        'id, lead_ref, full_name, phone, email, status, source, assigned_to, created_at, notes, callback_at, callback_note, sent_by_name, sent_to_client, prospect_by_name'
+      )
       .order('created_at', { ascending: false })
 
     if (error) {
@@ -424,6 +521,8 @@ export default function LeadsPage() {
   const sheetStatuses = useMemo(() => {
     if (sheet === 'ACTIVE') return [...ACTIVE_STATUSES]
     if (sheet === 'ARCHIVE') return [...ARCHIVE_STATUSES]
+    if (sheet === 'CLIENTS') return ['Sent To Client'] as const
+    if (sheet === 'PROSPECTS') return ['Prospect Client'] as const
     return [...STATUS_OPTIONS]
   }, [sheet])
 
@@ -444,10 +543,14 @@ export default function LeadsPage() {
     const q = query.trim().toLowerCase()
 
     const inSheet = (l: Lead) => {
+      const status = (l.status || '').trim().toLowerCase()
+
       if (sheet === 'ALL') return true
-      const status = (l.status || '').trim()
+      if (sheet === 'CLIENTS') return status === 'sent to client'
+      if (sheet === 'PROSPECTS') return status === 'prospect client'
+
       const list = sheet === 'ACTIVE' ? ACTIVE_STATUSES : ARCHIVE_STATUSES
-      return list.some((s) => s.toLowerCase() === status.toLowerCase())
+      return list.some((s) => s.toLowerCase() === status)
     }
 
     const inStatus = (l: Lead) => {
@@ -468,6 +571,9 @@ export default function LeadsPage() {
         l.source || '',
         l.assigned_to || '',
         l.callback_at || '',
+        l.sent_to_client || '',
+        l.sent_by_name || '',
+        l.prospect_by_name || '',
       ]
         .join(' ')
         .toLowerCase()
@@ -478,7 +584,7 @@ export default function LeadsPage() {
   }, [leads, sheet, statusFilter, query])
 
   // =========================
-  // ✅ Export current view (records)
+  // ✅ Export current view
   // =========================
   const exportCurrentView = () => {
     const headers = [
@@ -492,6 +598,9 @@ export default function LeadsPage() {
       'created_at',
       'callback_at',
       'callback_note',
+      'sent_by_name',
+      'sent_to_client',
+      'prospect_by_name',
       'latest_note',
       'id',
     ]
@@ -507,6 +616,9 @@ export default function LeadsPage() {
       l.created_at || '',
       l.callback_at || '',
       l.callback_note || '',
+      l.sent_by_name || '',
+      l.sent_to_client || '',
+      l.prospect_by_name || '',
       l.notes || '',
       l.id || '',
     ])
@@ -516,7 +628,7 @@ export default function LeadsPage() {
   }
 
   // =========================
-  // ✅ Export notes for open lead (notes history)
+  // ✅ Export notes for open lead
   // =========================
   const exportNotesForOpenLead = () => {
     if (!notesLead) return
@@ -559,6 +671,11 @@ export default function LeadsPage() {
       status: editDraft.status,
       source: editDraft.source,
       assigned_to: editDraft.assigned_to,
+
+      // ✅ include new fields
+      sent_by_name: editDraft.sent_by_name ?? null,
+      sent_to_client: editDraft.sent_to_client ?? null,
+      prospect_by_name: editDraft.prospect_by_name ?? null,
     }
 
     const { error } = await supabase.from('leads').update(payload).eq('id', editDraft.id)
@@ -594,7 +711,7 @@ export default function LeadsPage() {
   }
 
   // =========================
-  // ✅ DNC (Backlog + Wipe) action (EVERYONE CAN DNC)
+  // ✅ DNC (Backlog + Wipe)
   // =========================
   const handleDNC = async (lead: Lead) => {
     const ok = confirm(`Move ${lead.full_name} to DNC backlog and wipe from CRM?`)
@@ -622,7 +739,8 @@ export default function LeadsPage() {
     ])
 
     const msg = (insErr?.message || '').toLowerCase()
-    const isDuplicatePhone = msg.includes('duplicate key') || msg.includes('already exists') || msg.includes('unique') || msg.includes('dnc_backlog_phone_unique')
+    const isDuplicatePhone =
+      msg.includes('duplicate key') || msg.includes('already exists') || msg.includes('unique') || msg.includes('dnc_backlog_phone_unique')
 
     if (insErr && !isDuplicatePhone) {
       alert(`Failed to add to DNC backlog: ${insErr.message}`)
@@ -653,11 +771,7 @@ export default function LeadsPage() {
     setNotesOpen(true)
     setNotesLoading(true)
 
-    const { data, error } = await supabase
-      .from('lead_notes')
-      .select('id, lead_id, note, created_at')
-      .eq('lead_id', lead.id)
-      .order('created_at', { ascending: false })
+    const { data, error } = await supabase.from('lead_notes').select('id, lead_id, note, created_at').eq('lead_id', lead.id).order('created_at', { ascending: false })
 
     if (error) {
       setNotesLoading(false)
@@ -718,10 +832,11 @@ export default function LeadsPage() {
 
   const handleAddLead = async () => {
     if (!newLead.full_name.trim()) return alert('Full name is required.')
-
     setAdding(true)
 
-    const payload = {
+    // ✅ If user selects Sent To Client or Prospect Client from Add modal,
+    // keep it as-is, but fields can be filled later via status dropdown overlay.
+    const payload: any = {
       lead_ref: newLead.lead_ref.trim() || null,
       full_name: newLead.full_name.trim(),
       phone: newLead.phone.trim(),
@@ -732,12 +847,17 @@ export default function LeadsPage() {
       notes: newLead.notes.trim() || null,
       callback_at: null,
       callback_note: null,
+
+      // new fields default null
+      sent_by_name: null,
+      sent_to_client: null,
+      prospect_by_name: null,
     }
 
     const { data, error } = await supabase
       .from('leads')
       .insert([payload])
-      .select('id, lead_ref, full_name, phone, email, status, source, assigned_to, created_at, notes, callback_at, callback_note')
+      .select('id, lead_ref, full_name, phone, email, status, source, assigned_to, created_at, notes, callback_at, callback_note, sent_by_name, sent_to_client, prospect_by_name')
       .single()
 
     if (error) {
@@ -756,7 +876,6 @@ export default function LeadsPage() {
   // =========================
   const title = 'Lead Control Panel'
 
-  // ✅ Zoom style wrapper (Chrome = zoom, Firefox = transform fallback)
   const zoomWrap: CSSProperties = useCssZoom
     ? { zoom: UI_ZOOM }
     : {
@@ -800,7 +919,7 @@ export default function LeadsPage() {
                 <div style={avatar}>T5</div>
                 <div>
                   <div style={h1}>{title}</div>
-                  <div style={subtitle}>Status dropdown → choose Callback → pick date/time → CRM alert.</div>
+                  <div style={subtitle}>Status dropdown → choose Callback / Sent To Client / Prospect Client → overlay → saved.</div>
                 </div>
               </div>
 
@@ -837,13 +956,15 @@ export default function LeadsPage() {
                 <TabButton label="All" active={sheet === 'ALL'} onClick={() => setSheet('ALL')} />
                 <TabButton label="Active" active={sheet === 'ACTIVE'} onClick={() => setSheet('ACTIVE')} />
                 <TabButton label="Archive" active={sheet === 'ARCHIVE'} onClick={() => setSheet('ARCHIVE')} />
+                <TabButton label="Clients" active={sheet === 'CLIENTS'} onClick={() => setSheet('CLIENTS')} />
+                <TabButton label="Prospects" active={sheet === 'PROSPECTS'} onClick={() => setSheet('PROSPECTS')} />
               </div>
 
               <div style={{ ...searchWrap, maxWidth: isMobile ? '100%' : 620 }}>
                 <input
                   value={query}
                   onChange={(e) => setQuery(e.target.value)}
-                  placeholder="Search lead_ref, name, phone, email, assigned_to…"
+                  placeholder="Search lead_ref, name, phone, email, assigned_to, sent to, staff…"
                   style={search}
                 />
               </div>
@@ -860,12 +981,7 @@ export default function LeadsPage() {
               </button>
 
               {sheetStatuses.map((s) => (
-                <button
-                  key={s}
-                  onClick={() => setStatusFilter(s)}
-                  style={statusFilter === s ? statusChipActive : statusChip}
-                  title={`Filter: ${s}`}
-                >
+                <button key={s} onClick={() => setStatusFilter(s)} style={statusFilter === s ? statusChipActive : statusChip} title={`Filter: ${s}`}>
                   {s} <span style={countPill}>{statusCounts[s] || 0}</span>
                 </button>
               ))}
@@ -893,11 +1009,11 @@ export default function LeadsPage() {
             ) : filteredLeads.length === 0 ? (
               <div style={emptyBox}>No leads found. Try changing sheet/status or clearing your search.</div>
             ) : isMobile ? (
-              // ✅ Mobile: card list view
               <div style={cardsWrap}>
                 {filteredLeads.map((lead) => {
                   const isEditing = editingLeadId === lead.id
                   const refToShow = lead.lead_ref || makeLeadRefFallback(lead.id)
+                  const lowerStatus = (lead.status || '').toLowerCase()
 
                   return (
                     <div key={lead.id} style={card}>
@@ -908,23 +1024,13 @@ export default function LeadsPage() {
 
                       <div style={cardNameRow}>
                         {isEditing ? (
-                          <input
-                            style={inputInline}
-                            value={editDraft?.full_name || ''}
-                            onChange={(e) => setEditDraft((p) => (p ? { ...p, full_name: e.target.value } : p))}
-                          />
+                          <input style={inputInline} value={editDraft?.full_name || ''} onChange={(e) => setEditDraft((p) => (p ? { ...p, full_name: e.target.value } : p))} />
                         ) : (
                           <div style={cardName}>{lead.full_name}</div>
                         )}
 
-                        {/* ✅ Always quick-status select (non-edit) */}
                         {!isEditing && (
-                          <select
-                            style={{ ...selectInline, maxWidth: 210 }}
-                            value={lead.status}
-                            onChange={(e) => updateLeadStatusQuick(lead, e.target.value)}
-                            title="Change status"
-                          >
+                          <select style={{ ...selectInline, maxWidth: 210 }} value={lead.status} onChange={(e) => updateLeadStatusQuick(lead, e.target.value)} title="Change status">
                             {STATUS_OPTIONS.map((s) => (
                               <option key={s} value={s}>
                                 {s}
@@ -934,22 +1040,31 @@ export default function LeadsPage() {
                         )}
                       </div>
 
-                      {lead.status.toLowerCase() === 'callback' && lead.callback_at && (
+                      {lowerStatus === 'callback' && lead.callback_at && (
                         <div style={{ marginTop: 10, display: 'flex', gap: 10, flexWrap: 'wrap' }}>
                           <span style={pillDate}>⏰ {formatDateTime(lead.callback_at)}</span>
                           {lead.callback_note ? <span style={pillId}>📝 {lead.callback_note}</span> : null}
                         </div>
                       )}
 
+                      {lowerStatus === 'sent to client' && lead.sent_to_client ? (
+                        <div style={{ marginTop: 10, display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+                          <span style={pillDate}>🏷 {lead.sent_to_client}</span>
+                          {lead.sent_by_name ? <span style={pillId}>🧑‍💼 {lead.sent_by_name}</span> : null}
+                        </div>
+                      ) : null}
+
+                      {lowerStatus === 'prospect client' && lead.prospect_by_name ? (
+                        <div style={{ marginTop: 10, display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+                          <span style={pillDate}>🧑‍💼 {lead.prospect_by_name}</span>
+                        </div>
+                      ) : null}
+
                       <div style={cardGrid}>
                         <div style={cardItem}>
                           <div style={cardLabel}>Phone</div>
                           {isEditing ? (
-                            <input
-                              style={inputInline}
-                              value={editDraft?.phone || ''}
-                              onChange={(e) => setEditDraft((p) => (p ? { ...p, phone: e.target.value } : p))}
-                            />
+                            <input style={inputInline} value={editDraft?.phone || ''} onChange={(e) => setEditDraft((p) => (p ? { ...p, phone: e.target.value } : p))} />
                           ) : (
                             <div style={cardValue}>{lead.phone || '—'}</div>
                           )}
@@ -958,11 +1073,7 @@ export default function LeadsPage() {
                         <div style={cardItem}>
                           <div style={cardLabel}>Email</div>
                           {isEditing ? (
-                            <input
-                              style={inputInline}
-                              value={editDraft?.email || ''}
-                              onChange={(e) => setEditDraft((p) => (p ? { ...p, email: e.target.value } : p))}
-                            />
+                            <input style={inputInline} value={editDraft?.email || ''} onChange={(e) => setEditDraft((p) => (p ? { ...p, email: e.target.value } : p))} />
                           ) : (
                             <div style={cardValue}>{lead.email || '—'}</div>
                           )}
@@ -971,11 +1082,7 @@ export default function LeadsPage() {
                         <div style={cardItem}>
                           <div style={cardLabel}>Source</div>
                           {isEditing ? (
-                            <select
-                              style={selectInline}
-                              value={editDraft?.source || 'Instagram'}
-                              onChange={(e) => setEditDraft((p) => (p ? { ...p, source: e.target.value } : p))}
-                            >
+                            <select style={selectInline} value={editDraft?.source || 'Instagram'} onChange={(e) => setEditDraft((p) => (p ? { ...p, source: e.target.value } : p))}>
                               {SOURCE_OPTIONS.map((s) => (
                                 <option key={s} value={s}>
                                   {s}
@@ -990,11 +1097,7 @@ export default function LeadsPage() {
                         <div style={cardItem}>
                           <div style={cardLabel}>Assigned</div>
                           {isEditing ? (
-                            <input
-                              style={inputInline}
-                              value={editDraft?.assigned_to || ''}
-                              onChange={(e) => setEditDraft((p) => (p ? { ...p, assigned_to: e.target.value } : p))}
-                            />
+                            <input style={inputInline} value={editDraft?.assigned_to || ''} onChange={(e) => setEditDraft((p) => (p ? { ...p, assigned_to: e.target.value } : p))} />
                           ) : (
                             <div style={cardValue}>{lead.assigned_to || '—'}</div>
                           )}
@@ -1003,11 +1106,7 @@ export default function LeadsPage() {
                         <div style={{ ...cardItem, gridColumn: '1 / -1' }}>
                           <div style={cardLabel}>Status (Edit Mode)</div>
                           {isEditing ? (
-                            <select
-                              style={selectInline}
-                              value={editDraft?.status || 'New Lead'}
-                              onChange={(e) => setEditDraft((p) => (p ? { ...p, status: e.target.value } : p))}
-                            >
+                            <select style={selectInline} value={editDraft?.status || 'New Lead'} onChange={(e) => setEditDraft((p) => (p ? { ...p, status: e.target.value } : p))}>
                               {STATUS_OPTIONS.map((s) => (
                                 <option key={s} value={s}>
                                   {s}
@@ -1034,12 +1133,7 @@ export default function LeadsPage() {
                           </>
                         ) : (
                           <>
-                            <button
-                              style={btnIcon}
-                              onClick={() => openNotes(lead)}
-                              title={lead.notes ? `Latest: ${lead.notes}` : 'Open notes'}
-                              aria-label="Open notes"
-                            >
+                            <button style={btnIcon} onClick={() => openNotes(lead)} title={lead.notes ? `Latest: ${lead.notes}` : 'Open notes'} aria-label="Open notes">
                               <NoteIcon size={16} />
                             </button>
 
@@ -1062,7 +1156,6 @@ export default function LeadsPage() {
                 })}
               </div>
             ) : (
-              // ✅ Desktop/tablet table
               <div style={tableWrap}>
                 <table style={table}>
                   <colgroup>
@@ -1071,10 +1164,10 @@ export default function LeadsPage() {
                     <col style={{ width: 240 }} />
                     <col style={{ width: 150 }} />
                     <col style={{ width: 320 }} />
+                    <col style={{ width: 320 }} />
                     <col style={{ width: 220 }} />
                     <col style={{ width: 220 }} />
                     <col style={{ width: 170 }} />
-                    <col style={{ width: 130 }} />
                     <col style={{ width: 90 }} />
                     <col style={{ width: 240 }} />
                   </colgroup>
@@ -1099,23 +1192,13 @@ export default function LeadsPage() {
                     {filteredLeads.map((lead, i) => {
                       const isEditing = editingLeadId === lead.id
                       const refToShow = lead.lead_ref || makeLeadRefFallback(lead.id)
+                      const lowerStatus = (lead.status || '').toLowerCase()
 
                       return (
-                        <tr
-                          key={lead.id}
-                          style={{
-                            ...tr,
-                            background: i % 2 === 0 ? 'rgba(0,0,0,0.10)' : 'rgba(255,255,255,0.02)',
-                          }}
-                        >
+                        <tr key={lead.id} style={{ ...tr, background: i % 2 === 0 ? 'rgba(0,0,0,0.10)' : 'rgba(255,255,255,0.02)' }}>
                           <td style={tdMono}>
                             {isEditing ? (
-                              <input
-                                style={inputInline}
-                                value={editDraft?.lead_ref || ''}
-                                onChange={(e) => setEditDraft((p) => (p ? { ...p, lead_ref: e.target.value } : p))}
-                                placeholder="ECO0001"
-                              />
+                              <input style={inputInline} value={editDraft?.lead_ref || ''} onChange={(e) => setEditDraft((p) => (p ? { ...p, lead_ref: e.target.value } : p))} placeholder="ECO0001" />
                             ) : (
                               <span style={pillRef}>{refToShow}</span>
                             )}
@@ -1127,11 +1210,7 @@ export default function LeadsPage() {
 
                           <td style={td}>
                             {isEditing ? (
-                              <input
-                                style={inputInline}
-                                value={editDraft?.full_name || ''}
-                                onChange={(e) => setEditDraft((p) => (p ? { ...p, full_name: e.target.value } : p))}
-                              />
+                              <input style={inputInline} value={editDraft?.full_name || ''} onChange={(e) => setEditDraft((p) => (p ? { ...p, full_name: e.target.value } : p))} />
                             ) : (
                               <span style={{ fontWeight: 950 }}>{lead.full_name}</span>
                             )}
@@ -1139,11 +1218,7 @@ export default function LeadsPage() {
 
                           <td style={td}>
                             {isEditing ? (
-                              <input
-                                style={inputInline}
-                                value={editDraft?.phone || ''}
-                                onChange={(e) => setEditDraft((p) => (p ? { ...p, phone: e.target.value } : p))}
-                              />
+                              <input style={inputInline} value={editDraft?.phone || ''} onChange={(e) => setEditDraft((p) => (p ? { ...p, phone: e.target.value } : p))} />
                             ) : (
                               <span style={{ fontWeight: 950 }}>{lead.phone}</span>
                             )}
@@ -1151,26 +1226,15 @@ export default function LeadsPage() {
 
                           <td style={td}>
                             {isEditing ? (
-                              <input
-                                style={inputInline}
-                                value={editDraft?.email || ''}
-                                onChange={(e) => setEditDraft((p) => (p ? { ...p, email: e.target.value } : p))}
-                              />
+                              <input style={inputInline} value={editDraft?.email || ''} onChange={(e) => setEditDraft((p) => (p ? { ...p, email: e.target.value } : p))} />
                             ) : (
                               <span style={{ fontWeight: 900 }}>{lead.email}</span>
                             )}
                           </td>
 
-                          {/* ✅ Status column:
-                              - edit mode uses draft
-                              - normal mode uses quick dropdown; selecting Callback opens overlay */}
                           <td style={td}>
                             {isEditing ? (
-                              <select
-                                style={selectInline}
-                                value={editDraft?.status || 'New Lead'}
-                                onChange={(e) => setEditDraft((p) => (p ? { ...p, status: e.target.value } : p))}
-                              >
+                              <select style={selectInline} value={editDraft?.status || 'New Lead'} onChange={(e) => setEditDraft((p) => (p ? { ...p, status: e.target.value } : p))}>
                                 {STATUS_OPTIONS.map((s) => (
                                   <option key={s} value={s}>
                                     {s}
@@ -1180,10 +1244,10 @@ export default function LeadsPage() {
                             ) : (
                               <div style={{ display: 'flex', gap: 10, alignItems: 'center', minWidth: 0 }}>
                                 <select
-                                  style={{ ...selectInline, minWidth: 160 }}
+                                  style={{ ...selectInline, minWidth: 170 }}
                                   value={lead.status}
                                   onChange={(e) => updateLeadStatusQuick(lead, e.target.value)}
-                                  title="Change status (Callback opens calendar)"
+                                  title="Change status (Callback / Sent To Client / Prospect Client opens overlay)"
                                 >
                                   {STATUS_OPTIONS.map((s) => (
                                     <option key={s} value={s}>
@@ -1192,9 +1256,22 @@ export default function LeadsPage() {
                                   ))}
                                 </select>
 
-                                {lead.status.toLowerCase() === 'callback' && lead.callback_at ? (
+                                {lowerStatus === 'callback' && lead.callback_at ? (
                                   <span style={pillDate} title={lead.callback_note || ''}>
                                     ⏰ {formatDateTime(lead.callback_at)}
+                                  </span>
+                                ) : null}
+
+                                {lowerStatus === 'sent to client' && lead.sent_to_client ? (
+                                  <span style={pillDate} title={lead.sent_by_name || ''}>
+                                    🏷 {lead.sent_to_client}
+                                    {lead.sent_by_name ? ` • ${lead.sent_by_name}` : ''}
+                                  </span>
+                                ) : null}
+
+                                {lowerStatus === 'prospect client' && lead.prospect_by_name ? (
+                                  <span style={pillDate} title="Prospect owner">
+                                    🧑‍💼 {lead.prospect_by_name}
                                   </span>
                                 ) : null}
                               </div>
@@ -1203,11 +1280,7 @@ export default function LeadsPage() {
 
                           <td style={td}>
                             {isEditing ? (
-                              <select
-                                style={selectInline}
-                                value={editDraft?.source || 'Instagram'}
-                                onChange={(e) => setEditDraft((p) => (p ? { ...p, source: e.target.value } : p))}
-                              >
+                              <select style={selectInline} value={editDraft?.source || 'Instagram'} onChange={(e) => setEditDraft((p) => (p ? { ...p, source: e.target.value } : p))}>
                                 {SOURCE_OPTIONS.map((s) => (
                                   <option key={s} value={s}>
                                     {s}
@@ -1221,12 +1294,7 @@ export default function LeadsPage() {
 
                           <td style={td}>
                             {isEditing ? (
-                              <input
-                                style={inputInline}
-                                value={editDraft?.assigned_to || ''}
-                                onChange={(e) => setEditDraft((p) => (p ? { ...p, assigned_to: e.target.value } : p))}
-                                placeholder="Georgie"
-                              />
+                              <input style={inputInline} value={editDraft?.assigned_to || ''} onChange={(e) => setEditDraft((p) => (p ? { ...p, assigned_to: e.target.value } : p))} placeholder="Georgie" />
                             ) : (
                               <span style={{ fontWeight: 900 }}>{lead.assigned_to || '—'}</span>
                             )}
@@ -1237,12 +1305,7 @@ export default function LeadsPage() {
                           </td>
 
                           <td style={td}>
-                            <button
-                              style={btnIcon}
-                              onClick={() => openNotes(lead)}
-                              title={lead.notes ? `Latest: ${lead.notes}` : 'Open notes'}
-                              aria-label="Open notes"
-                            >
+                            <button style={btnIcon} onClick={() => openNotes(lead)} title={lead.notes ? `Latest: ${lead.notes}` : 'Open notes'} aria-label="Open notes">
                               <NoteIcon size={16} />
                             </button>
                           </td>
@@ -1298,30 +1361,15 @@ export default function LeadsPage() {
 
                 <div style={{ ...formGrid, gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr' }}>
                   <Field label="Lead Ref (optional)">
-                    <input
-                      style={input}
-                      value={newLead.lead_ref}
-                      onChange={(e) => setNewLead((p) => ({ ...p, lead_ref: e.target.value }))}
-                      placeholder="ECO0001"
-                    />
+                    <input style={input} value={newLead.lead_ref} onChange={(e) => setNewLead((p) => ({ ...p, lead_ref: e.target.value }))} placeholder="ECO0001" />
                   </Field>
 
                   <Field label="Assigned To (optional)">
-                    <input
-                      style={input}
-                      value={newLead.assigned_to}
-                      onChange={(e) => setNewLead((p) => ({ ...p, assigned_to: e.target.value }))}
-                      placeholder="Georgie"
-                    />
+                    <input style={input} value={newLead.assigned_to} onChange={(e) => setNewLead((p) => ({ ...p, assigned_to: e.target.value }))} placeholder="Georgie" />
                   </Field>
 
                   <Field label="Full Name">
-                    <input
-                      style={input}
-                      value={newLead.full_name}
-                      onChange={(e) => setNewLead((p) => ({ ...p, full_name: e.target.value }))}
-                      placeholder="John Graham"
-                    />
+                    <input style={input} value={newLead.full_name} onChange={(e) => setNewLead((p) => ({ ...p, full_name: e.target.value }))} placeholder="John Graham" />
                   </Field>
 
                   <Field label="Phone">
@@ -1329,12 +1377,7 @@ export default function LeadsPage() {
                   </Field>
 
                   <Field label="Email">
-                    <input
-                      style={input}
-                      value={newLead.email}
-                      onChange={(e) => setNewLead((p) => ({ ...p, email: e.target.value }))}
-                      placeholder="name@email.com"
-                    />
+                    <input style={input} value={newLead.email} onChange={(e) => setNewLead((p) => ({ ...p, email: e.target.value }))} placeholder="name@email.com" />
                   </Field>
 
                   <Field label="Status">
@@ -1456,7 +1499,7 @@ export default function LeadsPage() {
             </div>
           )}
 
-          {/* ✅ Callback Overlay (STEP 4) */}
+          {/* ✅ Callback Overlay */}
           {cbOpen && cbLead && (
             <div style={overlay} onMouseDown={(e) => e.target === e.currentTarget && closeCallbackModal()}>
               <div style={{ ...modal, width: 760 }}>
@@ -1477,13 +1520,7 @@ export default function LeadsPage() {
 
                 <div style={{ padding: '10px 6px 4px' }}>
                   <div style={fieldLabel}>Pick date & time</div>
-                  <input
-                    type="datetime-local"
-                    style={input}
-                    value={cbWhen}
-                    onChange={(e) => setCbWhen(e.target.value)}
-                    min={toLocalInputValue(new Date().toISOString())}
-                  />
+                  <input type="datetime-local" style={input} value={cbWhen} onChange={(e) => setCbWhen(e.target.value)} min={toLocalInputValue(new Date().toISOString())} />
 
                   <div style={{ height: 14 }} />
 
@@ -1504,8 +1541,68 @@ export default function LeadsPage() {
                     </button>
                   </div>
 
+                  <div style={{ ...notesTip, marginTop: 6 }}>Alerts trigger on this page when callback time is due (and won’t repeat for the same time).</div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* ✅ Sent To Client / Prospect Overlay */}
+          {spOpen && spLead && (
+            <div style={overlay} onMouseDown={(e) => e.target === e.currentTarget && closeSentProspectModal()}>
+              <div style={{ ...modal, width: 760 }}>
+                <div style={modalTop}>
+                  <div>
+                    <div style={modalTitle}>
+                      {spMode === 'SENT' ? 'Sent To Client' : 'Prospect Client'} —{' '}
+                      <span style={{ color: 'rgba(120,255,255,0.95)' }}>{spLead.full_name}</span>
+                    </div>
+                    <div style={modalSub}>
+                      Lead Ref: <b>{spLead.lead_ref || makeLeadRefFallback(spLead.id)}</b> • Phone: <b>{spLead.phone || '—'}</b>
+                    </div>
+                  </div>
+
+                  <button style={btnSm} onClick={closeSentProspectModal} disabled={spSaving}>
+                    ✕
+                  </button>
+                </div>
+
+                <div style={{ padding: '10px 6px 4px' }}>
+                  <div style={fieldLabel}>Staff/Admin name</div>
+                  <select style={select} value={spStaff} onChange={(e) => setSpStaff(e.target.value)}>
+                    <option value="">Select…</option>
+                    {STAFF_OPTIONS.map((n) => (
+                      <option key={n} value={n}>
+                        {n}
+                      </option>
+                    ))}
+                  </select>
+
+                  {spMode === 'SENT' && (
+                    <>
+                      <div style={{ height: 14 }} />
+                      <div style={fieldLabel}>Sent to (client name)</div>
+                      <input style={input} value={spSentTo} onChange={(e) => setSpSentTo(e.target.value)} placeholder="e.g. Emma — ER Web Leads" />
+                    </>
+                  )}
+
+                  <div style={modalActions}>
+                    <button style={btnSm} onClick={closeSentProspectModal} disabled={spSaving}>
+                      Cancel
+                    </button>
+                    <button
+                      style={btnPrimary}
+                      onClick={saveSentProspect}
+                      disabled={spSaving || !spStaff.trim() || (spMode === 'SENT' && !spSentTo.trim())}
+                    >
+                      {spSaving ? 'Saving…' : 'Save'}
+                    </button>
+                  </div>
+
                   <div style={{ ...notesTip, marginTop: 6 }}>
-                    Alerts trigger on this page when callback time is due (and won’t repeat for the same time).
+                    {spMode === 'SENT'
+                      ? 'This records who sent it, and which client it was sent to. The lead will appear under Clients tab.'
+                      : 'This records which staff/admin owns the prospect. The lead will appear under Prospects tab.'}
                   </div>
                 </div>
               </div>
@@ -1542,6 +1639,9 @@ function Field({ label, children, full }: { label: string; children: React.React
 
 function filteredCountForAll(sheet: SheetKey, leads: Lead[]) {
   if (sheet === 'ALL') return leads.length
+  if (sheet === 'CLIENTS') return leads.filter((l) => (l.status || '').toLowerCase() === 'sent to client').length
+  if (sheet === 'PROSPECTS') return leads.filter((l) => (l.status || '').toLowerCase() === 'prospect client').length
+
   const list = sheet === 'ACTIVE' ? ACTIVE_STATUSES : ARCHIVE_STATUSES
   const set = new Set(list.map((s) => s.toLowerCase()))
   return leads.filter((l) => set.has((l.status || '').toLowerCase())).length
@@ -1634,8 +1734,7 @@ const header: CSSProperties = {
   borderRadius: 18,
   background: 'linear-gradient(180deg, rgba(255,255,255,0.06), rgba(255,255,255,0.03))',
   border: '1px solid rgba(0,255,255,0.22)',
-  boxShadow:
-    '0 20px 70px rgba(0,0,0,0.55), 0 0 0 1px rgba(0,255,255,0.08) inset, 0 0 40px rgba(0,255,255,0.10)',
+  boxShadow: '0 20px 70px rgba(0,0,0,0.55), 0 0 0 1px rgba(0,255,255,0.08) inset, 0 0 40px rgba(0,255,255,0.10)',
   backdropFilter: 'blur(10px)',
 }
 
@@ -1872,6 +1971,7 @@ function statusPill(status: string) {
   if (s === 'callback') return { ...base, border: '1px solid rgba(255,210,90,0.32)', background: 'rgba(255,210,90,0.10)' }
   if (s === 'sent to client') return { ...base, border: '1px solid rgba(0,200,255,0.32)', background: 'rgba(0,200,255,0.10)' }
   if (s === 'looking for home') return { ...base, border: '1px solid rgba(0,255,180,0.32)', background: 'rgba(0,255,180,0.10)' }
+  if (s === 'prospect client') return { ...base, border: '1px solid rgba(0,160,255,0.35)', background: 'rgba(0,160,255,0.12)' }
   return base
 }
 

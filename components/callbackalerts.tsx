@@ -4,6 +4,7 @@
 import { useEffect, useRef } from 'react'
 import { supabase } from '@/lib/supabaseClient'
 
+
 type Lead = {
   id: string
   lead_ref: string | null
