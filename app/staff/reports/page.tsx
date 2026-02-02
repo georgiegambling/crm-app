@@ -47,6 +47,10 @@ type NewSaleForm = {
   initial_note: string
 }
 
+type EditSaleForm = Omit<NewSaleForm, 'initial_note'> & {
+  // keep same fields minus initial_note
+}
+
 type SRAttachment = {
   id: string
   report_id: number
@@ -191,6 +195,23 @@ export default function StaffReportsPage() {
   const [initialFiles, setInitialFiles] = useState<File[]>([])
   const initialFileInputRef = useRef<HTMLInputElement | null>(null)
 
+  // ✅ Edit sale modal
+  const [openEdit, setOpenEdit] = useState(false)
+  const [editing, setEditing] = useState(false)
+  const [editId, setEditId] = useState<number | null>(null)
+  const [editForm, setEditForm] = useState<EditSaleForm>(() => ({
+    report_ref: '',
+    report_date: '',
+    status: 'Potential Client',
+    company_name: '',
+    client_contact_name: '',
+    client_phone: '',
+    client_email: '',
+    campaign_name: '',
+    sale_price: '',
+    records_sent: '',
+  }))
+
   // Notes overlay
   const [notesOpen, setNotesOpen] = useState(false)
   const [notesReport, setNotesReport] = useState<SalesReportRow | null>(null)
@@ -202,14 +223,32 @@ export default function StaffReportsPage() {
   const noteFileInputRef = useRef<HTMLInputElement | null>(null)
 
   useEffect(() => {
-    ;(async () => {
-      const { data } = await supabase.auth.getUser()
-      setUserId(data?.user?.id ?? null)
-    })()
-  }, [])
+  ;(async () => {
+    // ✅ avoid "Invalid Refresh Token" spam by checking session first
+    const { data: s } = await supabase.auth.getSession()
+
+    if (!s.session) {
+      setUserId(null)
+      return
+    }
+
+    const { data, error } = await supabase.auth.getUser()
+
+    // ✅ if session storage is broken, reset cleanly
+    if (error?.message?.toLowerCase().includes('refresh token')) {
+      await supabase.auth.signOut()
+      setUserId(null)
+      return
+    }
+
+    setUserId(data?.user?.id ?? null)
+  })()
+}, [])
+
 
   const repLabel = (r: SalesReportRow) => r.profiles?.display_name || r.profiles?.email || r.sales_rep || '—'
   const canDelete = (r: SalesReportRow) => !!userId && r.rep_user_id === userId
+  const canEdit = (r: SalesReportRow) => !!userId && r.rep_user_id === userId
 
   const fetchReports = async () => {
     setErrorMsg(null)
@@ -487,6 +526,123 @@ export default function StaffReportsPage() {
     await fetchReports()
   }
 
+  // ✅ ---------- Edit Sale ----------
+  const openEditModal = (r: SalesReportRow) => {
+    setErrorMsg(null)
+    setSuccessMsg(null)
+
+    if (!canEdit(r)) {
+      setErrorMsg('You can only edit your own sales reports.')
+      return
+    }
+
+    setEditId(r.id)
+    setEditForm({
+      report_ref: r.report_ref || '',
+      report_date: r.report_date || new Date().toISOString(),
+     status: r.status === 'Client' ? 'Client' : 'Potential Client',
+      company_name: r.company_name || '',
+      client_contact_name: r.client_contact_name || '',
+      client_phone: r.client_phone || '',
+      client_email: r.client_email || '',
+      campaign_name: r.campaign_name || '',
+      sale_price: r.sale_price === null || typeof r.sale_price === 'undefined' ? '' : String(r.sale_price),
+      records_sent: r.records_sent === null || typeof r.records_sent === 'undefined' ? '' : String(r.records_sent),
+    })
+    setOpenEdit(true)
+  }
+
+  const closeEditModal = () => {
+    if (editing) return
+    setOpenEdit(false)
+    setEditId(null)
+  }
+
+  const saveEdit = async () => {
+    setErrorMsg(null)
+    setSuccessMsg(null)
+
+    if (!userId) return setErrorMsg('Login required.')
+    if (!editId) return setErrorMsg('Missing report id.')
+
+    const company_name = editForm.company_name.trim()
+    const campaign_name = editForm.campaign_name.trim()
+    const report_ref = editForm.report_ref.trim() || makeReportRef()
+    const report_date = editForm.report_date ? new Date(editForm.report_date).toISOString() : new Date().toISOString()
+    const status = editForm.status
+
+    if (!company_name) return setErrorMsg('Company name is required.')
+    if (!campaign_name) return setErrorMsg('Campaign name is required.')
+
+    const sale_price = safeNumberOrNull(editForm.sale_price)
+    const records_sent = safeNumberOrNull(editForm.records_sent)
+
+    if (sale_price === (NaN as any)) return setErrorMsg('Sale price must be a valid number.')
+    if (records_sent === (NaN as any)) return setErrorMsg('Records sent must be a valid number.')
+    if (sale_price !== null && sale_price < 0) return setErrorMsg('Sale price cannot be negative.')
+    if (records_sent !== null && records_sent < 0) return setErrorMsg('Records sent cannot be negative.')
+
+    setEditing(true)
+
+    // extra safety: only update if it's yours
+    const { data: updated, error: upErr } = await supabase
+      .from('sales_reports')
+      .update({
+        report_ref,
+        report_date,
+        status,
+        company_name,
+        client_contact_name: editForm.client_contact_name.trim() || null,
+        client_phone: editForm.client_phone.trim() || null,
+        client_email: editForm.client_email.trim() || null,
+        campaign_name,
+        sale_price,
+        records_sent,
+      })
+      .eq('id', editId)
+      .eq('rep_user_id', userId)
+      .select(
+        `
+        id,
+        report_ref,
+        report_date,
+        status,
+        company_name,
+        client_contact_name,
+        client_phone,
+        client_email,
+        campaign_name,
+        sale_price,
+        records_sent,
+        client_name,
+        sales_rep,
+        rep_user_id,
+        profiles (
+          display_name,
+          email
+        )
+      `
+      )
+      .single()
+
+    if (upErr) {
+      setEditing(false)
+      setErrorMsg(upErr.message)
+      return
+    }
+
+    // optimistic update local list so it feels instant
+    if (updated) {
+      setRows((prev) => prev.map((x) => (x.id === editId ? (updated as unknown as SalesReportRow) : x)))
+    }
+
+    setEditing(false)
+    setOpenEdit(false)
+    setEditId(null)
+    setSuccessMsg('Report updated.')
+    await fetchReports()
+  }
+
   const deleteSale = async (r: SalesReportRow) => {
     setErrorMsg(null)
     setSuccessMsg(null)
@@ -705,6 +861,8 @@ export default function StaffReportsPage() {
                 <tbody>
                   {filtered.map((r, i) => {
                     const delOk = canDelete(r)
+                    const editOk = canEdit(r)
+
                     return (
                       <tr
                         key={r.id}
@@ -741,15 +899,27 @@ export default function StaffReportsPage() {
                         </td>
 
                         <td style={tdRight}>
-                          <button
-                            style={delOk ? dangerBtn : dangerBtnDisabled}
-                            onClick={() => deleteSale(r)}
-                            disabled={!delOk}
-                            aria-disabled={!delOk}
-                            title={delOk ? 'Delete this report' : 'You can only delete your own reports'}
-                          >
-                            Delete
-                          </button>
+                          <div style={{ display: 'inline-flex', gap: 8 }}>
+                            <button
+                              style={editOk ? btnSmall : btnSmallDisabled}
+                              onClick={() => openEditModal(r)}
+                              disabled={!editOk}
+                              aria-disabled={!editOk}
+                              title={editOk ? 'Edit this report' : 'You can only edit your own reports'}
+                            >
+                              Edit
+                            </button>
+
+                            <button
+                              style={delOk ? dangerBtn : dangerBtnDisabled}
+                              onClick={() => deleteSale(r)}
+                              disabled={!delOk}
+                              aria-disabled={!delOk}
+                              title={delOk ? 'Delete this report' : 'You can only delete your own reports'}
+                            >
+                              Delete
+                            </button>
+                          </div>
                         </td>
                       </tr>
                     )
@@ -864,6 +1034,88 @@ export default function StaffReportsPage() {
               </button>
               <button style={btnPrimary} onClick={saveSale} disabled={saving} aria-disabled={saving}>
                 {saving ? 'Saving…' : 'Save Sale'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ✅ ---- Edit Sale Modal ---- */}
+      {openEdit && (
+        <div style={modalOverlay} onMouseDown={closeEditModal}>
+          <div style={modalCard} onMouseDown={(e) => e.stopPropagation()}>
+            <div style={modalTop}>
+              <div>
+                <div style={{ fontSize: 16, fontWeight: 1000 }}>Edit Sale</div>
+                <div style={{ marginTop: 4, fontSize: 12, opacity: 0.75, fontWeight: 800 }}>Edits update sales_reports only.</div>
+              </div>
+
+              <button style={iconBtn} onClick={closeEditModal} disabled={editing} aria-disabled={editing} title="Close">
+                ✕
+              </button>
+            </div>
+
+            <div style={formGrid}>
+              <label style={label}>
+                <div style={labelTop}>Report Ref</div>
+                <input style={input} value={editForm.report_ref} onChange={(e) => setEditForm((p) => ({ ...p, report_ref: e.target.value }))} />
+              </label>
+
+              <label style={label}>
+                <div style={labelTop}>Report Date</div>
+                <input style={input} value={editForm.report_date} onChange={(e) => setEditForm((p) => ({ ...p, report_date: e.target.value }))} />
+              </label>
+
+              <label style={label}>
+                <div style={labelTop}>Status *</div>
+                <select style={{ ...input, cursor: 'pointer' }} value={editForm.status} onChange={(e) => setEditForm((p) => ({ ...p, status: e.target.value as ReportStatus }))}>
+                  <option value="Potential Client">Potential Client</option>
+                  <option value="Client">Client</option>
+                </select>
+              </label>
+
+              <label style={label}>
+                <div style={labelTop}>Company Name *</div>
+                <input style={input} value={editForm.company_name} onChange={(e) => setEditForm((p) => ({ ...p, company_name: e.target.value }))} />
+              </label>
+
+              <label style={label}>
+                <div style={labelTop}>Client Contact Name</div>
+                <input style={input} value={editForm.client_contact_name} onChange={(e) => setEditForm((p) => ({ ...p, client_contact_name: e.target.value }))} />
+              </label>
+
+              <label style={label}>
+                <div style={labelTop}>Client Phone</div>
+                <input style={input} value={editForm.client_phone} onChange={(e) => setEditForm((p) => ({ ...p, client_phone: e.target.value }))} />
+              </label>
+
+              <label style={label}>
+                <div style={labelTop}>Client Email</div>
+                <input style={input} value={editForm.client_email} onChange={(e) => setEditForm((p) => ({ ...p, client_email: e.target.value }))} />
+              </label>
+
+              <label style={label}>
+                <div style={labelTop}>Campaign Name *</div>
+                <input style={input} value={editForm.campaign_name} onChange={(e) => setEditForm((p) => ({ ...p, campaign_name: e.target.value }))} />
+              </label>
+
+              <label style={label}>
+                <div style={labelTop}>Sale Price (£)</div>
+                <input style={input} inputMode="decimal" value={editForm.sale_price} onChange={(e) => setEditForm((p) => ({ ...p, sale_price: e.target.value }))} />
+              </label>
+
+              <label style={label}>
+                <div style={labelTop}>Records Sent</div>
+                <input style={input} inputMode="numeric" value={editForm.records_sent} onChange={(e) => setEditForm((p) => ({ ...p, records_sent: e.target.value }))} />
+              </label>
+            </div>
+
+            <div style={modalActions}>
+              <button style={btnGhost} onClick={closeEditModal} disabled={editing} aria-disabled={editing}>
+                Cancel
+              </button>
+              <button style={btnPrimary} onClick={saveEdit} disabled={editing} aria-disabled={editing}>
+                {editing ? 'Saving…' : 'Save Changes'}
               </button>
             </div>
           </div>
@@ -1094,6 +1346,12 @@ const btnSmall: CSSProperties = {
   border: '1px solid rgba(0,255,255,0.22)',
   background: 'rgba(0,255,255,0.10)',
   color: '#fff',
+}
+
+const btnSmallDisabled: CSSProperties = {
+  ...btnSmall,
+  opacity: 0.45,
+  cursor: 'not-allowed',
 }
 
 const errorBar: CSSProperties = {
