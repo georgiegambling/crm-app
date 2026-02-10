@@ -1,14 +1,16 @@
 'use client'
 
 import React, { CSSProperties, useMemo, useState } from 'react'
-import { useRouter } from 'next/navigation'
+import { useRouter, useSearchParams } from 'next/navigation'
 import * as Papa from 'papaparse'
 import { supabase } from '@/lib/supabaseClient'
 import Sidebar from '@/components/Sidebar'
+import { CAMPAIGNS, CampaignKey } from '@/lib/campaignConfig'
 
 type CsvRow = Record<string, unknown>
 
 type LeadInsert = {
+  campaign: CampaignKey
   full_name: string
   phone: string
   email?: string | null
@@ -35,8 +37,20 @@ function cleanEmail(v: unknown) {
   return cleanText(v).toLowerCase()
 }
 
+function cleanCampaign(v: unknown, fallback: CampaignKey): CampaignKey {
+  const raw = cleanText(v).toUpperCase()
+  const allowed = Object.keys(CAMPAIGNS) as CampaignKey[]
+  if (allowed.includes(raw as CampaignKey)) return raw as CampaignKey
+  return fallback
+}
+
 export default function LeadsImportPage() {
   const router = useRouter()
+  const searchParams = useSearchParams()
+
+  // ✅ campaign context comes from URL (fallback ECO4)
+  const campaign = (searchParams.get('campaign') || 'ECO4') as CampaignKey
+  const cfg = CAMPAIGNS[campaign] || CAMPAIGNS.ECO4
 
   const [fileName, setFileName] = useState<string>('')
   const [rawRows, setRawRows] = useState<CsvRow[]>([])
@@ -69,11 +83,13 @@ export default function LeadsImportPage() {
     setRawRows([])
   }
 
-  // ✅ UPDATED: email/status/source are OPTIONAL and get defaults if blank/missing
+  // ✅ email/status/source optional and get defaults
   function validateAndTransform(rows: CsvRow[]) {
     const leads: LeadInsert[] = []
     const errors: Array<{ row: number; reason: string }> = []
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/i
+
+    const allowedStatuses = new Set((cfg.statusOptions || []).map((s) => s.toLowerCase()))
 
     rows.forEach((r, idx) => {
       const rowNum = idx + 2 // header row is 1
@@ -93,30 +109,38 @@ export default function LeadsImportPage() {
       const statusRaw = cleanText((r as any).status)
       const sourceRaw = cleanText((r as any).source)
 
-      // ✅ Only validate email IF it was provided
+      // ✅ only validate email if provided
       if (emailRaw && !emailRegex.test(emailRaw)) {
         errors.push({ row: rowNum, reason: 'Email does not look valid' })
         return
       }
 
+      if (phone.length < 6) {
+        errors.push({ row: rowNum, reason: 'Phone looks too short after cleaning' })
+        return
+      }
+
+      // ✅ status: default + (optional) validate if they provided something weird
+      const finalStatus = statusRaw || 'New Lead'
+      if (statusRaw && allowedStatuses.size > 0 && !allowedStatuses.has(statusRaw.toLowerCase())) {
+        // don’t hard-fail if you don’t want to — but I’m warning because it breaks the UI filters
+        errors.push({ row: rowNum, reason: `Status "${statusRaw}" is not in this campaign's statusOptions` })
+        return
+      }
+
       const lead: LeadInsert = {
+        // ✅ CAMPAIGN: from CSV if present, else URL campaign
+        campaign: cleanCampaign((r as any).campaign, campaign),
+
         full_name,
         phone,
 
-        // ✅ optional: null if blank/missing
         email: emailRaw ? emailRaw : null,
-
-        // ✅ defaults if blank/missing
-        status: statusRaw || 'New Lead',
+        status: finalStatus,
         source: sourceRaw || 'CSV Import',
 
         assigned_to: (r as any).assigned_to ? cleanText((r as any).assigned_to) : null,
         lead_ref: (r as any).lead_ref ? cleanText((r as any).lead_ref) : null,
-      }
-
-      if (lead.phone.length < 6) {
-        errors.push({ row: rowNum, reason: 'Phone looks too short after cleaning' })
-        return
       }
 
       leads.push(lead)
@@ -149,7 +173,7 @@ export default function LeadsImportPage() {
         }
         setRawRows(data)
       },
-      error: (err) => setParseError(err?.message || 'Failed to parse CSV'),
+      error: (err) => setParseError((err as any)?.message || 'Failed to parse CSV'),
     })
   }
 
@@ -173,6 +197,7 @@ export default function LeadsImportPage() {
 
       for (let i = 0; i < leads.length; i += BATCH_SIZE) {
         const batch = leads.slice(i, i + BATCH_SIZE)
+
         const { error } = await supabase.from('leads').insert(batch as any)
 
         if (error) {
@@ -198,10 +223,10 @@ export default function LeadsImportPage() {
   }
 
   const downloadTemplate = () => {
-    // ✅ UPDATED: only full_name + phone required
-    const header = ['full_name', 'phone', 'email', 'status', 'source', 'assigned_to', 'lead_ref']
-    const sample1 = ['John Smith', '07123456789', '', '', '', '', '']
-    const sample2 = ['Sarah Khan', '07911112222', 'sarah@example.com', 'Contacted', 'Instagram', '', '']
+    // ✅ include campaign so you can import mixed-campaign files if you want
+    const header = ['campaign', 'full_name', 'phone', 'email', 'status', 'source', 'assigned_to', 'lead_ref']
+    const sample1 = [campaign, 'John Smith', '07123456789', '', '', '', '', '']
+    const sample2 = [campaign, 'Sarah Khan', '07911112222', 'sarah@example.com', 'Contacted', 'Instagram', '', '']
     const csv =
       [header, sample1, sample2]
         .map((row) =>
@@ -228,7 +253,6 @@ export default function LeadsImportPage() {
 
   return (
     <div style={page}>
-      {/* tiny keyframes for the success emoji */}
       <style>{`
         @keyframes t5-pop {
           0% { transform: scale(0.85) rotate(-8deg); filter: brightness(1); }
@@ -248,7 +272,6 @@ export default function LeadsImportPage() {
       <div style={bgGlowBottom} />
 
       <div style={container}>
-        {/* Header */}
         <div style={headerWrap}>
           <div style={brandRow}>
             <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
@@ -256,13 +279,19 @@ export default function LeadsImportPage() {
                 ← Dashboard
               </button>
 
-              <button onClick={() => router.push('/leads')} style={btnGhostSmall} title="Back to Leads">
+              {/* ✅ keep campaign context */}
+              <button onClick={() => router.push(`/leads?campaign=${campaign}`)} style={btnGhostSmall} title="Back to Leads">
                 ← Leads
               </button>
 
               <div style={brandPill}>
                 <span style={dot} />
                 <span style={{ opacity: 0.95 }}>Triple 555 CRM</span>
+              </div>
+
+              <div style={{ ...brandPill, background: 'rgba(0,140,255,0.10)', border: '1px solid rgba(0,140,255,0.30)' }}>
+                <span style={{ ...dot, background: 'rgba(0,140,255,0.95)' }} />
+                <span style={{ opacity: 0.95 }}>{String(campaign)}</span>
               </div>
             </div>
           </div>
@@ -273,8 +302,8 @@ export default function LeadsImportPage() {
               <div>
                 <div style={h1}>Import Leads</div>
                 <div style={subtitle}>
-                  Upload a CSV and bulk import to Supabase.{' '}
-                  <span style={monoBadge}>Required: full_name, phone • Optional: email, status, source, assigned_to, lead_ref</span>
+                  Campaign: <b>{cfg.label}</b> •{' '}
+                  <span style={monoBadge}>Required: full_name, phone • Optional: campaign, email, status, source, assigned_to, lead_ref</span>
                 </div>
               </div>
             </div>
@@ -297,16 +326,11 @@ export default function LeadsImportPage() {
           </div>
         </div>
 
-        {/* Upload + status panel */}
         <div style={panel}>
           <div style={panelHeader}>
             <div style={{ fontWeight: 900, letterSpacing: 0.2 }}>Upload</div>
             <div style={{ opacity: 0.85, fontWeight: 800, display: 'flex', gap: 10, alignItems: 'center' }}>
-              {fileName ? (
-                <span style={pillSoft}>{fileName}</span>
-              ) : (
-                <span style={{ opacity: 0.75 }}>No file selected</span>
-              )}
+              {fileName ? <span style={pillSoft}>{fileName}</span> : <span style={{ opacity: 0.75 }}>No file selected</span>}
               {normalisedRows.length > 0 && (
                 <span style={pillSoft}>
                   Rows loaded: <b style={{ color: 'rgba(120,255,255,0.95)' }}>{normalisedRows.length}</b>
@@ -339,7 +363,6 @@ export default function LeadsImportPage() {
             </div>
           </div>
 
-          {/* Progress */}
           {progress.total > 0 && (
             <div style={{ padding: '0 16px 16px 16px' }}>
               <div style={progressTop}>
@@ -354,7 +377,6 @@ export default function LeadsImportPage() {
             </div>
           )}
 
-          {/* Alerts */}
           {parseError && (
             <div style={alertError}>
               <b>Error:</b>&nbsp;{parseError}
@@ -393,7 +415,6 @@ export default function LeadsImportPage() {
           )}
         </div>
 
-        {/* Preview panel */}
         {normalisedRows.length > 0 && (
           <div style={panel}>
             <div style={panelHeader}>
@@ -449,8 +470,7 @@ const page: CSSProperties = {
   background:
     'radial-gradient(1200px 600px at 50% 0%, rgba(0,255,255,0.08), transparent 55%), linear-gradient(180deg, #020B22 0%, #01071A 45%, #01051A 100%)',
   color: '#fff',
-  fontFamily:
-    'Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif',
+  fontFamily: 'Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif',
   fontWeight: 800,
   position: 'relative',
   overflowX: 'hidden',
@@ -528,8 +548,7 @@ const header: CSSProperties = {
   borderRadius: 18,
   background: 'linear-gradient(180deg, rgba(255,255,255,0.06), rgba(255,255,255,0.03))',
   border: '1px solid rgba(0,255,255,0.22)',
-  boxShadow:
-    '0 20px 70px rgba(0,0,0,0.55), 0 0 0 1px rgba(0,255,255,0.08) inset, 0 0 40px rgba(0,255,255,0.10)',
+  boxShadow: '0 20px 70px rgba(0,0,0,0.55), 0 0 0 1px rgba(0,255,255,0.08) inset, 0 0 40px rgba(0,255,255,0.10)',
   backdropFilter: 'blur(10px)',
 }
 
@@ -551,8 +570,7 @@ const subtitle: CSSProperties = { marginTop: 2, fontSize: 12.5, fontWeight: 800,
 const headerRight: CSSProperties = { display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }
 
 const monoBadge: CSSProperties = {
-  fontFamily:
-    'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace',
+  fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace',
   padding: '2px 8px',
   borderRadius: 999,
   border: '1px solid rgba(255,255,255,0.12)',
@@ -685,7 +703,6 @@ const alertWarn: CSSProperties = {
   color: 'rgba(255,245,220,0.98)',
 }
 
-/* Table */
 const tableWrap: CSSProperties = { width: '100%', overflowX: 'auto' }
 
 const table: CSSProperties = {

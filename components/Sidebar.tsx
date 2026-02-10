@@ -17,7 +17,6 @@ export default function Sidebar({ role: roleProp }: SidebarProps) {
   const [open, setOpen] = useState(false)
   const [role, setRole] = useState<Role>(roleProp ?? 'client')
 
-  // ✅ simple viewport state (for responsive drawer sizing)
   const [vw, setVw] = useState<number>(1200)
   useEffect(() => {
     const onResize = () => setVw(window.innerWidth || 1200)
@@ -28,7 +27,6 @@ export default function Sidebar({ role: roleProp }: SidebarProps) {
   const isMobile = vw < 820
   const isTiny = vw < 420
 
-  // Auto-resolve role if not passed in
   useEffect(() => {
     if (roleProp) return
 
@@ -42,13 +40,11 @@ export default function Sidebar({ role: roleProp }: SidebarProps) {
     })()
   }, [roleProp])
 
-  // Close drawer on route change
   useEffect(() => {
     setOpen(false)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pathname])
 
-  // ESC closes + lock scroll while open
   useEffect(() => {
     if (!open) return
 
@@ -72,21 +68,15 @@ export default function Sidebar({ role: roleProp }: SidebarProps) {
   const items = useMemo(() => {
     return [
       { label: 'Dashboard', path: '/dashboard', show: true },
-      { label: 'Leads', path: '/leads', show: true },
 
-      // ✅ Staff/Admin only
+      // ✅ STAFF/ADMIN = campaign picker
+      { label: 'Leads', path: isStaff ? '/leads' : '/leads/view?campaign=ECO4', show: true },
+
       { label: 'Import Leads', path: '/leads/import', show: isStaff },
-
-      // ✅ Staff/Admin only (clients must NOT see this exists)
-      // Choose your route: '/reports' OR '/staff/reports' depending on where you put the page.
       { label: 'Sales Reports', path: '/staff/reports', show: isStaff },
 
-      // Admin-only examples
       { label: 'Users', path: '/admin/users', show: isAdmin },
       { label: 'Settings', path: '/admin/settings', show: isAdmin },
-
-      // ❌ Remove client access to any "reports" page unless you REALLY want a separate client-facing one.
-      // { label: 'My Reports', path: '/client/reports', show: role === 'client' },
     ].filter((x) => x.show)
   }, [isStaff, isAdmin])
 
@@ -94,14 +84,12 @@ export default function Sidebar({ role: roleProp }: SidebarProps) {
 
   return (
     <>
-      {/* Floating toggle */}
       {!open && (
         <button onClick={() => setOpen(true)} style={styles.fab} aria-label="Open menu" title="Menu">
           ☰
         </button>
       )}
 
-      {/* Backdrop + Drawer */}
       {open && (
         <div
           style={styles.backdrop}
@@ -128,18 +116,17 @@ export default function Sidebar({ role: roleProp }: SidebarProps) {
               <div style={styles.accessText}>{isStaff ? 'Internal access' : 'Client access'}</div>
             </div>
 
-            {/* ✅ Scrollable nav area */}
             <div style={styles.navScroll}>
               <div style={styles.nav}>
                 {items.map((item) => {
                   const active =
                     pathname === item.path ||
-                    (item.path !== '/' && pathname?.startsWith(item.path + '/')) ||
-                    (item.path === '/leads' && pathname?.startsWith('/leads'))
+                    (item.path.startsWith('/leads') && pathname?.startsWith('/leads')) ||
+                    (item.path !== '/' && pathname?.startsWith(item.path + '/'))
 
                   return (
                     <button
-                      key={item.path}
+                      key={item.path + item.label}
                       onClick={() => router.push(item.path)}
                       style={{
                         ...styles.navBtn,

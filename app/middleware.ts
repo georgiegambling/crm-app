@@ -1,3 +1,5 @@
+// middleware.ts (PROJECT ROOT)
+
 import { NextResponse, type NextRequest } from 'next/server'
 import { createServerClient } from '@supabase/ssr'
 
@@ -21,7 +23,7 @@ export async function middleware(request: NextRequest) {
     }
   )
 
-  // This refreshes the session cookie if needed
+  // refresh session cookie if needed
   await supabase.auth.getUser()
 
   return response

@@ -4,7 +4,7 @@ import React, { CSSProperties, useEffect, useMemo, useRef, useState } from 'reac
 import { supabase } from '@/lib/supabaseClient'
 
 type ViewMode = 'TEAM' | 'MINE'
-type ReportStatus = 'Potential Client' | 'Client'
+type ReportStatus = 'Potential Client' | 'Client' | 'Callback'
 
 type SalesReportRow = {
   id: number
@@ -21,6 +21,8 @@ type SalesReportRow = {
   campaign_name: string | null
   sale_price: number | null
   records_sent: number | null
+
+  callback_at: string | null // ✅
 
   // legacy/backwards compat
   client_name: string | null
@@ -44,6 +46,7 @@ type NewSaleForm = {
   campaign_name: string
   sale_price: string
   records_sent: string
+  callback_at: string // ✅ ISO string or ''
   initial_note: string
 }
 
@@ -65,7 +68,7 @@ type SRAttachment = {
 
 type SRNote = {
   id: string
-  report_id: number
+  report_id: string
   note: string
   created_at: string
   created_by: string | null
@@ -124,6 +127,7 @@ function toCsv(rows: SalesReportRow[]) {
     'Ref',
     'Date',
     'Status',
+    'Callback At',
     'Company',
     'Client Contact',
     'Client Phone',
@@ -147,6 +151,7 @@ function toCsv(rows: SalesReportRow[]) {
         r.report_ref,
         new Date(r.report_date).toISOString(),
         r.status ?? '',
+        r.callback_at ?? '',
         r.company_name ?? '',
         r.client_contact_name ?? '',
         r.client_phone ?? '',
@@ -176,6 +181,10 @@ export default function StaffReportsPage() {
   const [mode, setMode] = useState<ViewMode>('TEAM')
   const [userId, setUserId] = useState<string | null>(null)
 
+  // ✅ Alerts
+  const [overdueCount, setOverdueCount] = useState(0)
+  const [dueSoonCount, setDueSoonCount] = useState(0)
+
   // Add sale modal
   const [openAdd, setOpenAdd] = useState(false)
   const [saving, setSaving] = useState(false)
@@ -190,6 +199,7 @@ export default function StaffReportsPage() {
     campaign_name: '',
     sale_price: '',
     records_sent: '',
+    callback_at: '', // ✅
     initial_note: '',
   }))
   const [initialFiles, setInitialFiles] = useState<File[]>([])
@@ -210,6 +220,7 @@ export default function StaffReportsPage() {
     campaign_name: '',
     sale_price: '',
     records_sent: '',
+    callback_at: '', // ✅
   }))
 
   // Notes overlay
@@ -223,28 +234,26 @@ export default function StaffReportsPage() {
   const noteFileInputRef = useRef<HTMLInputElement | null>(null)
 
   useEffect(() => {
-  ;(async () => {
-    // ✅ avoid "Invalid Refresh Token" spam by checking session first
-    const { data: s } = await supabase.auth.getSession()
+    ;(async () => {
+      // ✅ avoid "Invalid Refresh Token" spam by checking session first
+      const { data: s } = await supabase.auth.getSession()
+      if (!s.session) {
+        setUserId(null)
+        return
+      }
 
-    if (!s.session) {
-      setUserId(null)
-      return
-    }
+      const { data, error } = await supabase.auth.getUser()
 
-    const { data, error } = await supabase.auth.getUser()
+      // ✅ if session storage is broken, reset cleanly
+      if (error?.message?.toLowerCase().includes('refresh token')) {
+        await supabase.auth.signOut()
+        setUserId(null)
+        return
+      }
 
-    // ✅ if session storage is broken, reset cleanly
-    if (error?.message?.toLowerCase().includes('refresh token')) {
-      await supabase.auth.signOut()
-      setUserId(null)
-      return
-    }
-
-    setUserId(data?.user?.id ?? null)
-  })()
-}, [])
-
+      setUserId(data?.user?.id ?? null)
+    })()
+  }, [])
 
   const repLabel = (r: SalesReportRow) => r.profiles?.display_name || r.profiles?.email || r.sales_rep || '—'
   const canDelete = (r: SalesReportRow) => !!userId && r.rep_user_id === userId
@@ -269,6 +278,7 @@ export default function StaffReportsPage() {
         campaign_name,
         sale_price,
         records_sent,
+        callback_at,
         client_name,
         sales_rep,
         rep_user_id,
@@ -291,6 +301,79 @@ export default function StaffReportsPage() {
 
     setRows((data ?? []) as unknown as SalesReportRow[])
   }
+
+  // ✅ Alerts polling (sales_reports, not leads)
+  useEffect(() => {
+    const i = setInterval(async () => {
+      if (!userId) {
+        setOverdueCount(0)
+        setDueSoonCount(0)
+        return
+      }
+
+      const now = new Date()
+      const nowIso = now.toISOString()
+      const soonIso = new Date(now.getTime() + 30 * 60 * 1000).toISOString() // next 30 mins
+
+      // overdue
+      let q1 = supabase
+        .from('sales_reports')
+        .select('id', { count: 'exact', head: true })
+        .eq('status', 'Callback')
+        .not('callback_at', 'is', null)
+        .lte('callback_at', nowIso)
+
+      if (mode === 'MINE') q1 = q1.eq('rep_user_id', userId)
+
+      const overdue = await q1
+      setOverdueCount(overdue.count ?? 0)
+
+      // due soon
+      let q2 = supabase
+        .from('sales_reports')
+        .select('id', { count: 'exact', head: true })
+        .eq('status', 'Callback')
+        .not('callback_at', 'is', null)
+        .gt('callback_at', nowIso)
+        .lte('callback_at', soonIso)
+
+      if (mode === 'MINE') q2 = q2.eq('rep_user_id', userId)
+
+      const dueSoon = await q2
+      setDueSoonCount(dueSoon.count ?? 0)
+    }, 30000)
+
+    // run once immediately (so you don’t wait 30s)
+    ;(async () => {
+      if (!userId) return
+      const now = new Date()
+      const nowIso = now.toISOString()
+      const soonIso = new Date(now.getTime() + 30 * 60 * 1000).toISOString()
+
+      let q1 = supabase
+        .from('sales_reports')
+        .select('id', { count: 'exact', head: true })
+        .eq('status', 'Callback')
+        .not('callback_at', 'is', null)
+        .lte('callback_at', nowIso)
+      if (mode === 'MINE') q1 = q1.eq('rep_user_id', userId)
+      const overdue = await q1
+      setOverdueCount(overdue.count ?? 0)
+
+      let q2 = supabase
+        .from('sales_reports')
+        .select('id', { count: 'exact', head: true })
+        .eq('status', 'Callback')
+        .not('callback_at', 'is', null)
+        .gt('callback_at', nowIso)
+        .lte('callback_at', soonIso)
+      if (mode === 'MINE') q2 = q2.eq('rep_user_id', userId)
+      const dueSoon = await q2
+      setDueSoonCount(dueSoon.count ?? 0)
+    })()
+
+    return () => clearInterval(i)
+  }, [userId, mode])
 
   useEffect(() => {
     ;(async () => {
@@ -320,6 +403,7 @@ export default function StaffReportsPage() {
         r.client_email ?? '',
         r.client_name ?? '',
         r.campaign_name ?? '',
+        r.callback_at ?? '',
         r.profiles?.display_name ?? '',
         r.profiles?.email ?? '',
         r.sales_rep ?? '',
@@ -406,6 +490,7 @@ export default function StaffReportsPage() {
       campaign_name: '',
       sale_price: '',
       records_sent: '',
+      callback_at: '',
       initial_note: '',
     })
     setOpenAdd(true)
@@ -432,6 +517,10 @@ export default function StaffReportsPage() {
     if (!company_name) return setErrorMsg('Company name is required.')
     if (!campaign_name) return setErrorMsg('Campaign name is required.')
 
+    if (status === 'Callback' && !form.callback_at) {
+      return setErrorMsg('Callback due time is required for Callback status.')
+    }
+
     const sale_price = safeNumberOrNull(form.sale_price)
     const records_sent = safeNumberOrNull(form.records_sent)
 
@@ -455,6 +544,7 @@ export default function StaffReportsPage() {
         campaign_name,
         sale_price,
         records_sent,
+        callback_at: status === 'Callback' ? form.callback_at : null,
         rep_user_id: userId,
       })
       .select(
@@ -470,6 +560,7 @@ export default function StaffReportsPage() {
         campaign_name,
         sale_price,
         records_sent,
+        callback_at,
         client_name,
         sales_rep,
         rep_user_id,
@@ -540,7 +631,7 @@ export default function StaffReportsPage() {
     setEditForm({
       report_ref: r.report_ref || '',
       report_date: r.report_date || new Date().toISOString(),
-     status: r.status === 'Client' ? 'Client' : 'Potential Client',
+      status: (r.status as ReportStatus) || 'Potential Client',
       company_name: r.company_name || '',
       client_contact_name: r.client_contact_name || '',
       client_phone: r.client_phone || '',
@@ -548,6 +639,7 @@ export default function StaffReportsPage() {
       campaign_name: r.campaign_name || '',
       sale_price: r.sale_price === null || typeof r.sale_price === 'undefined' ? '' : String(r.sale_price),
       records_sent: r.records_sent === null || typeof r.records_sent === 'undefined' ? '' : String(r.records_sent),
+      callback_at: r.callback_at ?? '',
     })
     setOpenEdit(true)
   }
@@ -574,6 +666,10 @@ export default function StaffReportsPage() {
     if (!company_name) return setErrorMsg('Company name is required.')
     if (!campaign_name) return setErrorMsg('Campaign name is required.')
 
+    if (status === 'Callback' && !editForm.callback_at) {
+      return setErrorMsg('Callback due time is required for Callback status.')
+    }
+
     const sale_price = safeNumberOrNull(editForm.sale_price)
     const records_sent = safeNumberOrNull(editForm.records_sent)
 
@@ -598,6 +694,7 @@ export default function StaffReportsPage() {
         campaign_name,
         sale_price,
         records_sent,
+        callback_at: status === 'Callback' ? editForm.callback_at : null,
       })
       .eq('id', editId)
       .eq('rep_user_id', userId)
@@ -614,6 +711,7 @@ export default function StaffReportsPage() {
         campaign_name,
         sale_price,
         records_sent,
+        callback_at,
         client_name,
         sales_rep,
         rep_user_id,
@@ -818,6 +916,24 @@ export default function StaffReportsPage() {
           </div>
         </div>
 
+        {/* ✅ ALERTS BAR */}
+        {(overdueCount > 0 || dueSoonCount > 0) && (
+          <div
+            style={{
+              marginTop: 14,
+              padding: '12px 14px',
+              borderRadius: 12,
+              background: overdueCount > 0 ? 'rgba(255,120,0,0.14)' : 'rgba(255,255,0,0.10)',
+              border: overdueCount > 0 ? '1px solid rgba(255,120,0,0.32)' : '1px solid rgba(255,255,0,0.22)',
+              fontWeight: 950,
+            }}
+          >
+            {overdueCount > 0 ? `⚠️ ${overdueCount} callback(s) overdue` : null}
+            {overdueCount > 0 && dueSoonCount > 0 ? ' • ' : null}
+            {dueSoonCount > 0 ? `⏳ ${dueSoonCount} due in next 30 mins` : null}
+          </div>
+        )}
+
         {errorMsg && (
           <div style={errorBar}>
             <b>Error:</b> {errorMsg}
@@ -847,6 +963,7 @@ export default function StaffReportsPage() {
                     <th style={th}>Ref</th>
                     <th style={th}>Date</th>
                     <th style={th}>Status</th>
+                    <th style={th}>Callback Due</th>
                     <th style={th}>Company</th>
                     <th style={th}>Client</th>
                     <th style={th}>Campaign</th>
@@ -876,8 +993,9 @@ export default function StaffReportsPage() {
                         </td>
                         <td style={td}>{formatDateTime(r.report_date)}</td>
                         <td style={td}>
-                          <span style={statusPill(r.status)}>{r.status || '—'}</span>
+                          <span style={statusPill(String(r.status || ''))}>{r.status || '—'}</span>
                         </td>
+                        <td style={td}>{String(r.status || '').toLowerCase() === 'callback' && r.callback_at ? formatDateTime(r.callback_at) : '—'}</td>
                         <td style={td}>{r.company_name || r.client_name || '—'}</td>
                         <td style={td}>
                           {r.client_contact_name || '—'}
@@ -967,8 +1085,27 @@ export default function StaffReportsPage() {
                 <select style={{ ...input, cursor: 'pointer' }} value={form.status} onChange={(e) => setForm((p) => ({ ...p, status: e.target.value as ReportStatus }))}>
                   <option value="Potential Client">Potential Client</option>
                   <option value="Client">Client</option>
+                  <option value="Callback">Callback</option>
                 </select>
               </label>
+
+              {form.status === 'Callback' && (
+                <label style={label}>
+                  <div style={labelTop}>Callback Due (required)</div>
+                  <input
+                    style={input}
+                    type="datetime-local"
+                    value={form.callback_at ? form.callback_at.slice(0, 16) : ''}
+                    onChange={(e) =>
+                      setForm((p) => ({
+                        ...p,
+                        callback_at: e.target.value ? new Date(e.target.value).toISOString() : '',
+                      }))
+                    }
+                  />
+                  <div style={hint}>This powers alerts + overdue tracking.</div>
+                </label>
+              )}
 
               <label style={label}>
                 <div style={labelTop}>Company Name *</div>
@@ -1071,8 +1208,27 @@ export default function StaffReportsPage() {
                 <select style={{ ...input, cursor: 'pointer' }} value={editForm.status} onChange={(e) => setEditForm((p) => ({ ...p, status: e.target.value as ReportStatus }))}>
                   <option value="Potential Client">Potential Client</option>
                   <option value="Client">Client</option>
+                  <option value="Callback">Callback</option>
                 </select>
               </label>
+
+              {editForm.status === 'Callback' && (
+                <label style={label}>
+                  <div style={labelTop}>Callback Due (required)</div>
+                  <input
+                    style={input}
+                    type="datetime-local"
+                    value={editForm.callback_at ? editForm.callback_at.slice(0, 16) : ''}
+                    onChange={(e) =>
+                      setEditForm((p) => ({
+                        ...p,
+                        callback_at: e.target.value ? new Date(e.target.value).toISOString() : '',
+                      }))
+                    }
+                  />
+                  <div style={hint}>This powers alerts + overdue tracking.</div>
+                </label>
+              )}
 
               <label style={label}>
                 <div style={labelTop}>Company Name *</div>
@@ -1392,7 +1548,7 @@ const panelTop: CSSProperties = {
 const empty: CSSProperties = { padding: 16, fontWeight: 900, opacity: 0.85 }
 
 const tableWrap: CSSProperties = { width: '100%', overflowX: 'auto' }
-const table: CSSProperties = { width: '100%', minWidth: 1400, borderCollapse: 'separate', borderSpacing: 0 }
+const table: CSSProperties = { width: '100%', minWidth: 1550, borderCollapse: 'separate', borderSpacing: 0 }
 
 const th: CSSProperties = {
   textAlign: 'left',
@@ -1444,6 +1600,7 @@ function statusPill(status: string) {
   }
   if (s === 'client') return { ...base, border: '1px solid rgba(0,255,255,0.35)', background: 'rgba(0,255,255,0.12)' }
   if (s === 'potential client') return { ...base, border: '1px solid rgba(0,160,255,0.35)', background: 'rgba(0,160,255,0.12)' }
+  if (s === 'callback') return { ...base, border: '1px solid rgba(255,200,0,0.35)', background: 'rgba(255,200,0,0.14)' }
   return base
 }
 
