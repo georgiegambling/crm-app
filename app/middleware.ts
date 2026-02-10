@@ -4,8 +4,9 @@ import { NextResponse, type NextRequest } from 'next/server'
 import { createServerClient } from '@supabase/ssr'
 
 export async function middleware(request: NextRequest) {
-  let response = NextResponse.next({ request })
+  const response = NextResponse.next()
 
+  // Supabase SSR client using middleware cookie helpers
   const supabase = createServerClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
     process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
@@ -23,7 +24,7 @@ export async function middleware(request: NextRequest) {
     }
   )
 
-  // refresh session cookie if needed
+  // Refresh session cookie if needed (safe no-op if not logged in)
   await supabase.auth.getUser()
 
   return response
